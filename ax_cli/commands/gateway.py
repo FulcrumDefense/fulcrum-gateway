@@ -1540,6 +1540,13 @@ def _set_managed_agent_desired_state(name: str, desired_state: str) -> dict:
     if not entry:
         raise LookupError(f"Managed agent not found: {name}")
     entry["desired_state"] = desired_state
+    if desired_state == "running":
+        entry["last_runtime_error_at"] = None
+        entry["consecutive_setup_errors"] = 0
+        entry["last_setup_error_signature"] = None
+        entry["setup_disabled"] = False
+        entry["setup_disabled_at"] = None
+        entry["setup_disabled_reason"] = None
     save_gateway_registry(registry)
     event = "managed_agent_desired_running" if desired_state == "running" else "managed_agent_desired_stopped"
     record_gateway_activity(event, entry=entry)
@@ -1631,6 +1638,12 @@ def _restore_hidden_managed_agents(names: list[str]) -> dict:
         entry.pop("desired_state_before_hide", None)
         entry.pop("hidden_at", None)
         entry.pop("hidden_reason", None)
+        entry["last_runtime_error_at"] = None
+        entry["consecutive_setup_errors"] = 0
+        entry["last_setup_error_signature"] = None
+        entry["setup_disabled"] = False
+        entry["setup_disabled_at"] = None
+        entry["setup_disabled_reason"] = None
         restored.append(entry)
 
     save_gateway_registry(registry)
