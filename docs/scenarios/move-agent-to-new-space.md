@@ -30,14 +30,16 @@ ax spaces list
 
 Find the target space name or ID.
 
-### 3. Switch the agent's space
+### 3. Move the agent to the target space
 
 ```bash
-ax spaces use <target-space-name>
+ax gateway agents move dev-sentinel --space <target-space-id>
 ```
 
-This updates the active space in `session.json`. The reconcile loop (runs every
-~10 seconds) will pick up the change and rebind the agent.
+This calls `_move_managed_agent_space()`, which updates the agent's
+`active_space_id` in the registry and rebinds the runtime. Do not use
+`ax spaces use` — that only changes the CLI's active space, not the agent's
+Gateway binding.
 
 ### 4. Verify the switch
 
@@ -68,7 +70,7 @@ The message should appear in the inbox under the new space context.
 | Problem | Cause | Fix |
 | --- | --- | --- |
 | `active_space_name` shows a UUID | Space cache has UUID-as-name from upstream | Wait for cache refresh, or restart Gateway to force a fresh `list_spaces` |
-| Agent stops responding after switch | Space binding not propagated | Check `session.json` for the new `space_id`, then `ax gateway agents restart <agent>` |
+| Agent stops responding after switch | Space binding not propagated | Check `session.json` for the new `space_id`, then `ax gateway agents stop <agent> && ax gateway agents start <agent>` |
 | "Not a member of space" error | Your user PAT doesn't have access to the target space | Ask admin to add you to the space |
 
 ## Learning goal
