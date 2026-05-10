@@ -135,7 +135,7 @@ ax send "recovery test" --to echo-bot --skip-ax
 | Problem | Cause | Fix |
 | --- | --- | --- |
 | Agent credentials lost | Token files in `~/.ax/gateway/agents/<name>/token` were deleted | Re-register the agent — Gateway will mint a new managed credential |
-| Agents have wrong space after recovery | `session.json` was rebuilt with default space | Re-run `ax spaces use <space>` to rebind |
+| Agents have wrong space after recovery | `session.json` was rebuilt with default space | For each agent: `ax gateway agents move <agent> --space <space-id>` to rebind |
 | Gateway starts but agents won't | Stale PID files in agent directories | Delete `~/.ax/gateway/agents/<name>/*.pid` |
 
 ## Learning goal

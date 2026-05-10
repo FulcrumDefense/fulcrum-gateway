@@ -50,7 +50,7 @@ The message should appear with a file attachment reference.
 | --- | --- | --- |
 | `upload_file` rejected by proxy | Agent doesn't have admin tier access — `upload_file` requires `tier: "admin"` in `_LOCAL_PROXY_METHODS` | Verify the agent's tier level; admin-tier proxy calls may require operator approval |
 | Upload path rejected | File path is outside the agent's configured workdir | Move the file into the agent's workdir, or update the agent's `--workdir` config |
-| Large file timeout | File exceeds the default timeout | Check if `--timeout` flag is available, or upload separately and reference by ID |
+| Large file timeout | File exceeds Gateway's upload timeout | Upload the file separately via the platform API and reference it by attachment ID in the message |
 
 ## Learning goal
 

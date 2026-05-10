@@ -70,11 +70,11 @@ The message should appear in the inbox under the new space context.
 | Problem | Cause | Fix |
 | --- | --- | --- |
 | `active_space_name` shows a UUID | Space cache has UUID-as-name from upstream | Wait for cache refresh, or restart Gateway to force a fresh `list_spaces` |
-| Agent stops responding after switch | Space binding not propagated | Check `session.json` for the new `space_id`, then `ax gateway agents stop <agent> && ax gateway agents start <agent>` |
+| Agent stops responding after switch | Space binding not propagated | Check `ax gateway agents show <agent>` for the new `active_space_id`, then `ax gateway agents stop <agent> && ax gateway agents start <agent>` |
 | "Not a member of space" error | Your user PAT doesn't have access to the target space | Ask admin to add you to the space |
 
 ## Learning goal
 
-Understanding the space resolution cascade: how `session.json`, per-agent
-`allowed_spaces` cache, and upstream API work together when an operator
-changes spaces. See [Gateway Agent Runtimes — Space Resolution](../gateway-agent-runtimes.md#space-resolution).
+Understanding the space resolution cascade: how the registry agent row
+(`active_space_id`), per-agent `allowed_spaces` cache, and upstream API work
+together when an operator moves an agent. See [Gateway Agent Runtimes — Space Resolution](../gateway-agent-runtimes.md#space-resolution).
