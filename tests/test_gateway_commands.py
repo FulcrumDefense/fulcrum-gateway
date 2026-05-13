@@ -3564,12 +3564,13 @@ def test_gateway_templates_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["templates"]]
-    assert ids[:10] == [
+    assert ids[:11] == [
         "hermes",
         "ollama",
         "langgraph",
         "autogen",
         "strands",
+        "bedrock_agentcore",
         "echo_test",
         "service_account",
         "pass_through",
@@ -3577,7 +3578,7 @@ def test_gateway_templates_command_json():
         "claude_code_channel",
     ]
     assert "inbox" not in ids
-    assert payload["count"] == 10
+    assert payload["count"] == 11
     ollama = next(item for item in payload["templates"] if item["id"] == "ollama")
     assert ollama["runtime_type"] == "exec"
     assert ollama["launchable"] is True
@@ -3722,12 +3723,13 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             assert template_payload["templates"][2]["id"] == "langgraph"
             assert template_payload["templates"][3]["id"] == "autogen"
             assert template_payload["templates"][4]["id"] == "strands"
-            assert template_payload["templates"][6]["id"] == "service_account"
+            assert template_payload["templates"][5]["id"] == "bedrock_agentcore"
+            assert template_payload["templates"][7]["id"] == "service_account"
             channel_template = next(
                 item for item in template_payload["templates"] if item["id"] == "claude_code_channel"
             )
             assert channel_template["runtime_type"] == "claude_code_channel"
-            assert template_payload["count"] == 10
+            assert template_payload["count"] == 11
 
             detail = client.get("/api/agents/echo-bot")
             assert detail.status_code == 200
@@ -8616,6 +8618,16 @@ def test_agents_inbox_resolves_slug_before_lookup(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert captured["space_id"] == "space-1"
+
+
+def test_agents_inbox_unknown_slug_errors_clearly(monkeypatch, tmp_path):
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_space_cache([])
+
+    result = runner.invoke(app, ["gateway", "agents", "inbox", "cli_god", "--space", "never-seen"])
+
+    assert result.exit_code != 0
+    assert "Could not resolve space" in result.output
 
 
 def test_inbox_for_managed_agent_clears_pending_queue_on_mark_read(monkeypatch, tmp_path):

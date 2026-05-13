@@ -64,6 +64,9 @@ mcp-postgres = [
     "sqlglot>=22.0",
     "psycopg[binary]>=3.2",
 ]
+bedrock = [
+    "boto3>=1.38",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

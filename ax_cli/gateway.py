@@ -3960,6 +3960,17 @@ def sanitize_exec_env(prompt: str, entry: dict[str, Any]) -> dict[str, str]:
     connector_ref = str(entry.get("connector_ref") or "").strip()
     if connector_ref:
         env["AX_GATEWAY_CONNECTOR_REF"] = connector_ref
+    bedrock_arn = str(entry.get("bedrock_runtime_arn") or "").strip()
+    if bedrock_arn:
+        env["AX_BEDROCK_RUNTIME_ARN"] = bedrock_arn
+        bedrock_region = str(entry.get("bedrock_region") or "").strip()
+        if bedrock_region:
+            env["AX_BEDROCK_REGION"] = bedrock_region
+        env["AX_BEDROCK_QUALIFIER"] = str(entry.get("bedrock_qualifier") or "DEFAULT").strip() or "DEFAULT"
+        env["AX_BEDROCK_PAYLOAD_KEY"] = str(entry.get("bedrock_payload_key") or "prompt").strip() or "prompt"
+        aws_profile = str(entry.get("aws_profile") or "").strip()
+        if aws_profile:
+            env["AWS_PROFILE"] = aws_profile
     return env
 
 
