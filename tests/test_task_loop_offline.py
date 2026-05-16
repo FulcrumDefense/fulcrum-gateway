@@ -36,12 +36,19 @@ def test_add_works_fully_offline_with_explicit_space_id(monkeypatch, tmp_path):
     result = runner.invoke(
         app,
         [
-            "reminders", "add", "task-O",
-            "--target", "orion",
-            "--space-id", "space-explicit",
-            "--first-in-minutes", "0",
-            "--mode", "manual",
-            "--file", str(policy_file),
+            "reminders",
+            "add",
+            "task-O",
+            "--target",
+            "orion",
+            "--space-id",
+            "space-explicit",
+            "--first-in-minutes",
+            "0",
+            "--mode",
+            "manual",
+            "--file",
+            str(policy_file),
             "--json",
         ],
     )
@@ -53,6 +60,7 @@ def test_add_works_fully_offline_with_explicit_space_id(monkeypatch, tmp_path):
 
 class _ConnectErrorClient:
     """Client whose send_message always raises httpx.ConnectError."""
+
     def __init__(self):
         self.send_attempts = 0
 
@@ -179,9 +187,7 @@ def test_status_command_shows_queue_and_drafts(monkeypatch, tmp_path):
         )
     )
 
-    result = runner.invoke(
-        app, ["reminders", "status", "--file", str(policy_file), "--skip-probe", "--json"]
-    )
+    result = runner.invoke(app, ["reminders", "status", "--file", str(policy_file), "--skip-probe", "--json"])
     assert result.exit_code == 0, result.output
     snapshot = json.loads(result.output)
 
@@ -206,9 +212,7 @@ def test_status_with_no_policies(monkeypatch, tmp_path):
     policy_file = tmp_path / "reminders.json"
     # File doesn't exist — _load_store returns _empty_store
 
-    result = runner.invoke(
-        app, ["reminders", "status", "--file", str(policy_file), "--skip-probe", "--json"]
-    )
+    result = runner.invoke(app, ["reminders", "status", "--file", str(policy_file), "--skip-probe", "--json"])
     assert result.exit_code == 0, result.output
     snapshot = json.loads(result.output)
     assert snapshot["policies_total"] == 0

@@ -53,6 +53,24 @@ jobs:
       - name: Ruff format check
         run: ruff format --check ax_cli/
 
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install package and pip-audit
+        run: |
+          pip install --upgrade pip setuptools
+          pip install -e .
+          pip install pip-audit
+
+      - name: Audit dependencies for known vulnerabilities
+        run: pip-audit --desc
+
   package:
     runs-on: ubuntu-latest
     steps:

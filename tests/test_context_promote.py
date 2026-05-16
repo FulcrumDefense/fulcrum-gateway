@@ -29,12 +29,14 @@ class _FakeClient:
     def promote_context(self, space_id, key, *, artifact_type="RESEARCH", agent_id=None):
         if self._raise:
             raise self._raise
-        self.calls.append({
-            "space_id": space_id,
-            "key": key,
-            "artifact_type": artifact_type,
-            "agent_id": agent_id,
-        })
+        self.calls.append(
+            {
+                "space_id": space_id,
+                "key": key,
+                "artifact_type": artifact_type,
+                "agent_id": agent_id,
+            }
+        )
         return self._response
 
 
@@ -105,13 +107,15 @@ def test_promote_with_explicit_space_id(monkeypatch):
 
 
 def test_promote_json_output(monkeypatch):
-    fake = _FakeClient(response={
-        "key": "report-2024",
-        "artifact_type": "RESEARCH",
-        "promoted_at": "2026-04-26T02:00:00Z",
-        "storage": "vault",
-        "version": 1,
-    })
+    fake = _FakeClient(
+        response={
+            "key": "report-2024",
+            "artifact_type": "RESEARCH",
+            "promoted_at": "2026-04-26T02:00:00Z",
+            "storage": "vault",
+            "version": 1,
+        }
+    )
     _install(monkeypatch, fake)
     result = runner.invoke(app, ["context", "promote", "report-2024", "--json"])
     assert result.exit_code == 0, result.output
@@ -122,6 +126,7 @@ def test_promote_json_output(monkeypatch):
 
 def test_promote_404_when_key_doesnt_exist(monkeypatch):
     """If the ephemeral key isn't there, backend returns 404 — surface cleanly."""
+
     class _Resp:
         status_code = 404
         text = '{"detail":"Key not found in ephemeral context"}'
@@ -135,6 +140,7 @@ def test_promote_404_when_key_doesnt_exist(monkeypatch):
 
 def test_promote_403_when_unauthorized(monkeypatch):
     """If user lacks promote permission for the space, backend returns 403."""
+
     class _Resp:
         status_code = 403
         text = '{"detail":"Forbidden"}'

@@ -35,13 +35,7 @@ def _write_local_gateway_config(tmp_path, *, url="http://127.0.0.1:8765", agent_
     local_ax = tmp_path / ".ax"
     local_ax.mkdir()
     (local_ax / "config.toml").write_text(
-        "[gateway]\n"
-        'mode = "local"\n'
-        f'url = "{url}"\n'
-        "\n"
-        "[agent]\n"
-        f'agent_name = "{agent_name}"\n'
-        f'workdir = "{tmp_path}"\n'
+        f'[gateway]\nmode = "local"\nurl = "{url}"\n\n[agent]\nagent_name = "{agent_name}"\nworkdir = "{tmp_path}"\n'
     )
     return local_ax / "config.toml"
 
@@ -71,9 +65,7 @@ def test_doctor_warns_credential_is_brokered_by_gateway(tmp_path, monkeypatch, i
     assert "credential_brokered_by_gateway" in warning_codes
 
 
-def test_doctor_does_not_emit_missing_token_problem_for_gateway_managed_config(
-    tmp_path, monkeypatch, isolated_global
-):
+def test_doctor_does_not_emit_missing_token_problem_for_gateway_managed_config(tmp_path, monkeypatch, isolated_global):
     _write_local_gateway_config(tmp_path)
     monkeypatch.chdir(tmp_path)
 

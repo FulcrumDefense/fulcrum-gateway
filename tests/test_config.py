@@ -15,9 +15,12 @@ from ax_cli.config import (
     _load_config,
     _load_local_config,
     _local_config_workdir_mismatch,
+    _save_config,
     _save_user_config,
     _warn_stale_workdir_local_config,
     diagnose_auth_config,
+    get_client,
+    get_user_client,
     resolve_agent_id,
     resolve_agent_name,
     resolve_base_url,
@@ -26,6 +29,8 @@ from ax_cli.config import (
     resolve_token,
     resolve_user_base_url,
     resolve_user_token,
+    save_space_id,
+    save_token,
 )
 
 
@@ -132,10 +137,10 @@ class TestLoadConfig:
         local_ax.mkdir()
         (local_ax / "config.toml").write_text(
             'space_id = "legacy-local-space"\n'
-            '[gateway]\n'
+            "[gateway]\n"
             'mode = "local"\n'
             'url = "http://127.0.0.1:8765"\n'
-            '[agent]\n'
+            "[agent]\n"
             'agent_name = "backend_sentinel"\n'
         )
         monkeypatch.chdir(tmp_path)
@@ -148,10 +153,10 @@ class TestLoadConfig:
         local_ax = tmp_path / ".ax"
         local_ax.mkdir()
         (local_ax / "config.toml").write_text(
-            '[gateway]\n'
+            "[gateway]\n"
             'base_url = "https://paxai.app"\n'
             'space_id = "team-space"\n'
-            '[agent]\n'
+            "[agent]\n"
             'agent_name = "codex-pass-through"\n'
         )
         monkeypatch.chdir(tmp_path)
@@ -746,6 +751,7 @@ class TestResolveBaseUrl:
 # [agent].workdir. Bug report: aX msg 06bc04f0.
 # ---------------------------------------------------------------------------
 
+
 class TestStaleWorkdirMismatch:
     def test_returns_none_when_workdir_matches(self, tmp_path):
         cfg = {"agent": {"workdir": str(tmp_path)}}
@@ -956,9 +962,7 @@ class TestProbeGatewayBinding:
 class TestDoctorV2Classifier:
     """Verify the post-Gateway diagnostic classifies correctly."""
 
-    def test_no_token_with_gateway_binding_is_brokered_not_missing(
-        self, tmp_path, monkeypatch
-    ):
+    def test_no_token_with_gateway_binding_is_brokered_not_missing(self, tmp_path, monkeypatch):
         wd = tmp_path / "ws"
         wd.mkdir()
         registry = {
@@ -973,9 +977,7 @@ class TestDoctorV2Classifier:
                 }
             ]
         }
-        _isolate_gateway_for_test(
-            monkeypatch, tmp_path / "gw", registry=registry, pid=os.getpid()
-        )
+        _isolate_gateway_for_test(monkeypatch, tmp_path / "gw", registry=registry, pid=os.getpid())
         monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
         monkeypatch.chdir(wd)
 
@@ -1011,21 +1013,15 @@ class TestDoctorV2Classifier:
             '[agent]\nagent_name = "alice"\n'
             f'workdir = "{wd}"\n'
         )
-        registry = {
-            "agents": [{"name": "alice", "workdir": str(wd), "agent_id": "agent-alice"}]
-        }
-        _isolate_gateway_for_test(
-            monkeypatch, tmp_path / "gw", registry=registry, pid=os.getpid()
-        )
+        registry = {"agents": [{"name": "alice", "workdir": str(wd), "agent_id": "agent-alice"}]}
+        _isolate_gateway_for_test(monkeypatch, tmp_path / "gw", registry=registry, pid=os.getpid())
         monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
         monkeypatch.chdir(wd)
         report = diagnose_auth_config()
         codes = [w["code"] for w in report["warnings"]]
         assert "local_token_with_gateway_binding" in codes
 
-    def test_ambiguous_gateway_binding_warns_when_multiple_candidates(
-        self, tmp_path, monkeypatch
-    ):
+    def test_ambiguous_gateway_binding_warns_when_multiple_candidates(self, tmp_path, monkeypatch):
         wd = tmp_path / "ws"
         wd.mkdir()
         registry = {
@@ -1034,9 +1030,7 @@ class TestDoctorV2Classifier:
                 {"name": "bob", "agent_id": "b-1", "workdir": str(wd)},
             ]
         }
-        _isolate_gateway_for_test(
-            monkeypatch, tmp_path / "gw", registry=registry, pid=os.getpid()
-        )
+        _isolate_gateway_for_test(monkeypatch, tmp_path / "gw", registry=registry, pid=os.getpid())
         monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
         monkeypatch.chdir(wd)
         report = diagnose_auth_config()
@@ -1055,3 +1049,265 @@ class TestDoctorV2Classifier:
         gb = report["effective"]["gateway_binding"]
         assert "daemon_running" in gb
         assert "bound_candidates" in gb
+
+
+# ---- _save_config ----
+
+
+class TestSaveConfig:
+    def test_saves_string_values(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        _save_config({"token": "axp_a_test", "base_url": "https://example.com"}, local=True)
+        content = (ax_dir / "config.toml").read_text()
+        assert 'token = "axp_a_test"' in content
+        assert 'base_url = "https://example.com"' in content
+
+    def test_saves_non_string_values(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        _save_config({"timeout": 30, "debug": True}, local=True)
+        content = (ax_dir / "config.toml").read_text()
+        assert "timeout = 30" in content
+        assert "debug = True" in content
+
+    def test_creates_ax_dir_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _save_config({"token": "test"}, local=True)
+        assert (tmp_path / ".ax" / "config.toml").exists()
+
+    def test_file_permissions(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".ax").mkdir()
+        _save_config({"token": "test"}, local=True)
+        cf = tmp_path / ".ax" / "config.toml"
+        assert cf.stat().st_mode & 0o777 == 0o600
+
+    def test_save_global(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
+        _save_config({"token": "global-tok"}, local=False)
+        cf = tmp_path / "global" / "config.toml"
+        assert cf.exists()
+        assert 'token = "global-tok"' in cf.read_text()
+
+
+class TestSaveToken:
+    def test_save_token_local(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".ax").mkdir()
+        (tmp_path / ".ax" / "config.toml").write_text('base_url = "https://paxai.app"\n')
+        save_token("axp_a_new", local=True)
+        content = (tmp_path / ".ax" / "config.toml").read_text()
+        assert "axp_a_new" in content
+
+
+class TestSaveSpaceId:
+    def test_save_space_id_local(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".ax").mkdir()
+        (tmp_path / ".ax" / "config.toml").write_text('token = "axp_a_x"\n')
+        save_space_id("space-uuid-123", local=True)
+        content = (tmp_path / ".ax" / "config.toml").read_text()
+        assert "space-uuid-123" in content
+
+
+# ---- resolve_agent_name auto-detect ----
+
+
+class TestResolveAgentNameAutoDetect:
+    def test_auto_detect_from_single_agent_pat(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("AX_AGENT_NAME", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = MagicMock()
+        client.whoami.return_value = {
+            "credential_scope": {"allowed_agent_ids": ["agent-123"]},
+        }
+        client.list_agents.return_value = [
+            {"id": "agent-123", "name": "orion"},
+            {"id": "agent-456", "name": "other"},
+        ]
+        result = resolve_agent_name(client=client)
+        assert result == "orion"
+
+    def test_auto_detect_skips_multi_agent_pat(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("AX_AGENT_NAME", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = MagicMock()
+        client.whoami.return_value = {
+            "credential_scope": {"allowed_agent_ids": ["a-1", "a-2"]},
+        }
+        result = resolve_agent_name(client=client)
+        assert result is None
+
+    def test_auto_detect_whoami_fails_returns_none(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("AX_AGENT_NAME", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = MagicMock()
+        client.whoami.side_effect = Exception("network error")
+        result = resolve_agent_name(client=client)
+        assert result is None
+
+
+# ---- resolve_space_id ----
+
+
+class TestResolveSpaceIdExtended:
+    def test_single_space_autodetect(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("AX_SPACE", raising=False)
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = MagicMock()
+        client.whoami.return_value = {}
+        client.list_spaces.return_value = [{"id": "space-1"}]
+        result = resolve_space_id(client, explicit=None)
+        assert result == "space-1"
+
+    def test_no_spaces_raises(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("AX_SPACE", raising=False)
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = MagicMock()
+        client.whoami.return_value = {}
+        client.list_spaces.return_value = []
+        with pytest.raises(Exit):
+            resolve_space_id(client, explicit=None)
+
+    def test_multiple_spaces_raises(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("AX_SPACE", raising=False)
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = MagicMock()
+        client.whoami.return_value = {}
+        client.list_spaces.return_value = [{"id": "s1"}, {"id": "s2"}]
+        with pytest.raises(Exit):
+            resolve_space_id(client, explicit=None)
+
+
+# ---- get_client / get_user_client ----
+
+
+class TestGetClient:
+    def test_raises_when_no_token(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AX_TOKEN", raising=False)
+        monkeypatch.delenv("AX_TOKEN_FILE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        with pytest.raises(Exit):
+            get_client()
+
+    def test_returns_client_with_token(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AX_TOKEN", "axp_a_test_token")
+        monkeypatch.setenv("AX_BASE_URL", "https://paxai.app")
+        monkeypatch.delenv("AX_AGENT_NAME", raising=False)
+        monkeypatch.delenv("AX_AGENT_ID", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = get_client()
+        assert client is not None
+
+    def test_verbose_mode_prints_env(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("AX_TOKEN", "axp_a_test")
+        monkeypatch.setenv("AX_BASE_URL", "https://paxai.app")
+        monkeypatch.setenv("AX_VERBOSE", "true")
+        monkeypatch.delenv("AX_AGENT_NAME", raising=False)
+        monkeypatch.delenv("AX_AGENT_ID", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        get_client()
+        captured = capsys.readouterr()
+        assert "paxai.app" in captured.err
+
+
+class TestGetUserClient:
+    def test_raises_when_no_user_token(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AX_USER_TOKEN", raising=False)
+        monkeypatch.delenv("AX_TOKEN", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        with pytest.raises(Exit):
+            get_user_client()
+
+    def test_raises_when_agent_pat(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AX_USER_TOKEN", "axp_a_agent_token")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        with pytest.raises(Exit):
+            get_user_client()
+
+    def test_returns_client_with_user_token(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AX_USER_TOKEN", "axp_u_user_token")
+        monkeypatch.setenv("AX_BASE_URL", "https://paxai.app")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        client = get_user_client()
+        assert client is not None
+
+
+# ---- resolve_user_token ----
+
+
+class TestResolveUserTokenExtended:
+    def test_falls_back_to_ax_token_user_pat(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AX_USER_TOKEN", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("AX_TOKEN", "axp_u_fallback")
+        result = resolve_user_token()
+        assert result == "axp_u_fallback"
+
+    def test_does_not_fall_back_to_agent_pat(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AX_USER_TOKEN", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("AX_TOKEN", "axp_a_agent_token")
+        result = resolve_user_token()
+        assert result is None
+
+
+# ---- _check_config_permissions ----
+
+
+class TestCheckConfigPermissionsExtended:
+    def test_warns_on_loose_permissions(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        cf = ax_dir / "config.toml"
+        cf.write_text('token = "test"\n')
+        cf.chmod(0o644)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
+        _check_config_permissions()
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err or "0o644" in captured.err
+
+    def test_no_warning_on_safe_permissions(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        cf = ax_dir / "config.toml"
+        cf.write_text('token = "test"\n')
+        cf.chmod(0o600)
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
+        _check_config_permissions()
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err

@@ -144,9 +144,7 @@ def test_print_pending_reply_warning_singular_with_one_sender(capsys):
 
 
 def test_print_pending_reply_warning_plural_with_multiple_senders(capsys):
-    print_pending_reply_warning(
-        {"count": 4, "message_ids": ["x"], "newest_senders": ["alice", "bob", "carol"]}
-    )
+    print_pending_reply_warning({"count": 4, "message_ids": ["x"], "newest_senders": ["alice", "bob", "carol"]})
     flat = " ".join(_strip_ansi(capsys.readouterr().out).split())
     assert "4 pending replies" in flat
     assert "newest from @alice" in flat
@@ -192,6 +190,7 @@ class _FakeSendClient:
         self._unread = unread_messages or []
         self._send_response = send_response or {"id": "sent-1", "message": {"id": "sent-1"}}
         self.list_messages_calls = 0
+        self.list_messages_kwargs = []
         self.send_calls = 0
 
     def whoami(self):
@@ -202,6 +201,7 @@ class _FakeSendClient:
 
     def list_messages(self, **kwargs):
         self.list_messages_calls += 1
+        self.list_messages_kwargs.append(kwargs)
         if not kwargs.get("unread_only"):
             return {"messages": []}
         return {"messages": self._unread, "unread_count": len(self._unread)}
@@ -231,6 +231,7 @@ def test_ax_send_warns_about_pending_replies_in_text_output(monkeypatch):
     assert "1 pending reply" in flat
     assert "newest from @boss" in flat
     assert fake.send_calls == 1
+    assert any(call.get("unread_only") is True for call in fake.list_messages_kwargs)
 
 
 def test_ax_send_no_warning_when_no_pending_replies(monkeypatch):
@@ -242,6 +243,7 @@ def test_ax_send_no_warning_when_no_pending_replies(monkeypatch):
     flat = " ".join(_strip_ansi(result.output).split())
     assert "Sent." in flat
     assert "pending repl" not in flat
+    assert any(call.get("unread_only") is True for call in fake.list_messages_kwargs)
 
 
 def test_ax_send_json_includes_pending_reply_fields(monkeypatch):
@@ -259,6 +261,7 @@ def test_ax_send_json_includes_pending_reply_fields(monkeypatch):
     assert payload["pending_reply_count"] == 2
     assert payload["pending_reply_message_ids"] == ["u1", "u2"]
     assert payload["pending_reply_newest_senders"] == ["boss", "ops"]
+    assert any(call.get("unread_only") is True for call in fake.list_messages_kwargs)
 
 
 def test_ax_send_json_zero_pending_when_clean(monkeypatch):
@@ -271,6 +274,7 @@ def test_ax_send_json_zero_pending_when_clean(monkeypatch):
     assert payload["pending_reply_count"] == 0
     assert payload["pending_reply_message_ids"] == []
     assert payload["pending_reply_newest_senders"] == []
+    assert any(call.get("unread_only") is True for call in fake.list_messages_kwargs)
 
 
 def test_ax_send_does_not_block_when_pending_reply_check_errors(monkeypatch):
@@ -278,6 +282,8 @@ def test_ax_send_does_not_block_when_pending_reply_check_errors(monkeypatch):
 
     class _BoomClient(_FakeSendClient):
         def list_messages(self, **kwargs):
+            self.list_messages_calls += 1
+            self.list_messages_kwargs.append(kwargs)
             if kwargs.get("unread_only"):
                 raise RuntimeError("network unavailable")
             return {"messages": []}
@@ -292,3 +298,4 @@ def test_ax_send_does_not_block_when_pending_reply_check_errors(monkeypatch):
     # Warning suppressed, send still delivered.
     assert "pending repl" not in flat
     assert fake.send_calls == 1
+    assert any(call.get("unread_only") is True for call in fake.list_messages_kwargs)

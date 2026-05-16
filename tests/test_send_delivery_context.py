@@ -49,20 +49,24 @@ def test_chip_renders_warm_wake_as_warming():
 
 
 def test_chip_renders_blocked_path_with_warning():
-    chip = _delivery_context_chip({
-        "delivery_path": "blocked_unroutable",
-        "warning": "target_quarantined",
-    })
+    chip = _delivery_context_chip(
+        {
+            "delivery_path": "blocked_unroutable",
+            "warning": "target_quarantined",
+        }
+    )
     assert "blocked (unroutable)" in chip
     assert "warning: target_quarantined" in chip
 
 
 def test_chip_renders_disagreement_signal():
     """Predicted vs actual mismatch is surfaced explicitly (debugging gold)."""
-    chip = _delivery_context_chip({
-        "expected_response_at_send": "warming",
-        "delivery_path": "live_session",
-    })
+    chip = _delivery_context_chip(
+        {
+            "expected_response_at_send": "warming",
+            "delivery_path": "live_session",
+        }
+    )
     assert chip is not None
     assert "predicted Warming" in chip
     assert "actually delivered live" in chip
@@ -70,10 +74,12 @@ def test_chip_renders_disagreement_signal():
 
 def test_chip_no_disagreement_when_paths_align():
     """When delivery_path matches expected_response_at_send, no predicted/actually banner."""
-    chip = _delivery_context_chip({
-        "expected_response_at_send": "immediate",
-        "delivery_path": "live_session",
-    })
+    chip = _delivery_context_chip(
+        {
+            "expected_response_at_send": "immediate",
+            "delivery_path": "live_session",
+        }
+    )
     assert "predicted" not in chip
     assert "delivered live" in chip
 
@@ -92,10 +98,12 @@ def test_chip_returns_none_for_empty_context():
 
 def test_chip_renders_dispatch_delayed_label():
     """The new v4 dispatch_delayed value renders distinctly from warming."""
-    chip = _delivery_context_chip({
-        "expected_response_at_send": "dispatch_delayed",
-        "delivery_path": "warm_wake",
-    })
+    chip = _delivery_context_chip(
+        {
+            "expected_response_at_send": "dispatch_delayed",
+            "delivery_path": "warm_wake",
+        }
+    )
     # dispatch_delayed maps to warm_wake → no disagreement
     assert "predicted" not in chip
     assert "warming target" in chip
@@ -119,9 +127,11 @@ def test_matches_expectation_table():
 
 def test_chip_handles_unknown_enum_values_gracefully():
     """Unknown delivery_path / expected values pass through as raw strings, no crash."""
-    chip = _delivery_context_chip({
-        "delivery_path": "future_path_xyz",
-        "expected_response_at_send": "future_value",
-    })
+    chip = _delivery_context_chip(
+        {
+            "delivery_path": "future_path_xyz",
+            "expected_response_at_send": "future_value",
+        }
+    )
     assert chip is not None
     assert "future_path_xyz" in chip

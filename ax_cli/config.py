@@ -1240,6 +1240,20 @@ def _resolve_space_ref(client: AxClient, ref: str, *, source: str) -> str:
     if _is_uuid_like(value):
         return value
 
+    # Cache short-circuit: any slug/name we've ever resolved before stays
+    # resolvable from disk without going upstream. This is the difference
+    # between a clean slug switch and a 429 from paxai.app.
+    try:
+        from .gateway import lookup_space_in_cache  # local import — avoid cycle
+
+        cached = lookup_space_in_cache(value)
+        if cached:
+            sid = str(cached.get("id") or cached.get("space_id") or "").strip()
+            if sid and _is_uuid_like(sid):
+                return sid
+    except Exception:
+        pass
+
     spaces = _space_items(client.list_spaces())
     needle = _space_lookup_key(value)
     matches = []
@@ -1274,6 +1288,28 @@ def _resolve_space_ref(client: AxClient, ref: str, *, source: str) -> str:
     if not space_id:
         typer.echo(f"Error: Matched space '{ref}' did not include an id.", err=True)
         raise typer.Exit(1)
+
+    # Persist the freshly-fetched list so future slug switches stay cached.
+    # Suppress any error: cache is a best-effort optimization, not load-bearing.
+    try:
+        from .gateway import save_space_cache  # local import — avoid cycle
+
+        normalized = []
+        for s in spaces:
+            sid_raw = str(s.get("id") or s.get("space_id") or "").strip()
+            if not sid_raw:
+                continue
+            normalized.append(
+                {
+                    "id": sid_raw,
+                    "name": str(s.get("name") or s.get("space_name") or sid_raw),
+                    "slug": str(s.get("slug") or "").strip() or None,
+                }
+            )
+        if normalized:
+            save_space_cache(normalized)
+    except Exception:
+        pass
     return str(space_id)
 
 

@@ -113,8 +113,8 @@ def test_operator_qa_ci_runs_doctor_preflight_matrix_and_writes_artifacts(tmp_pa
     assert (tmp_path / "artifacts" / "next-preflight.json").exists()
     assert (tmp_path / "artifacts" / "matrix" / "matrix.json").exists()
     assert (tmp_path / "artifacts" / "operator-qa-summary.json").exists()
-    assert 'axp_u_dev.secret' not in result.stdout
-    assert 'axp_u_next.secret' not in result.stdout
+    assert "axp_u_dev.secret" not in result.stdout
+    assert "axp_u_next.secret" not in result.stdout
 
 
 def test_operator_qa_ci_fails_when_configured_matrix_fails(tmp_path):

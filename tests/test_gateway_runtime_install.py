@@ -109,8 +109,10 @@ def test_install_clone_skipped_when_target_exists(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     # Mock hermes_setup_status to return ready
-    with patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run), \
-         patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "found"}):
+    with (
+        patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run),
+        patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "found"}),
+    ):
         result = _install_runtime_payload("hermes", operator_session={"user": "test"})
 
     assert result["ready"] is True
@@ -135,13 +137,16 @@ def test_install_full_path_succeeds(tmp_path, monkeypatch):
             (venv / "bin" / "pip").chmod(0o755)
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    with patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run), \
-         patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "ok"}):
+    with (
+        patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run),
+        patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "ok"}),
+    ):
         result = _install_runtime_payload("hermes", operator_session={"user": "test"})
 
     assert result["ready"] is True
     assert "installed at" in result["summary"]
     assert str(target) == result["target"]
+
     # _log appends; check terminal status per step
     def _terminal(name: str) -> str:
         matches = [s["status"] for s in result["steps"] if s["step"] == name]
@@ -177,8 +182,10 @@ def test_install_pip_failure_is_non_fatal(tmp_path, monkeypatch):
             raise subprocess.CalledProcessError(1, args, stderr="ERROR: simulated pip failure")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    with patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run), \
-         patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "found"}):
+    with (
+        patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run),
+        patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "found"}),
+    ):
         result = _install_runtime_payload("hermes", operator_session={"user": "test"})
 
     # Even though pip failed (warn-level), verify-step succeeded, so ready=True
@@ -224,12 +231,15 @@ def test_cli_install_json_output(monkeypatch, tmp_path):
             (venv / "bin" / "pip").chmod(0o755)
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    with patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run), \
-         patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "ok"}):
+    with (
+        patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run),
+        patch("ax_cli.gateway.hermes_setup_status", return_value={"ready": True, "summary": "ok"}),
+    ):
         result = runner.invoke(app, ["gateway", "runtime", "install", "hermes", "--json"])
 
     assert result.exit_code == 0, result.output
     import json
+
     payload = json.loads(result.output)
     assert payload["ready"] is True
     assert "target" in payload
@@ -291,7 +301,9 @@ def test_venv_preflight_fails_fast_when_ensurepip_missing(tmp_path, monkeypatch)
     def _fake_run(args, **kwargs):
         # Fail the ensurepip probe; let everything else through.
         if args[1:3] == ["-c", "import ensurepip"]:
-            return subprocess.CompletedProcess(args, 1, stdout="", stderr="ModuleNotFoundError: No module named 'ensurepip'")
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="ModuleNotFoundError: No module named 'ensurepip'"
+            )
         # Simulate clone success so we reach the venv pre-flight.
         if args[0] == "git" and args[1] == "clone":
             (tmp_path / "hermes-agent").mkdir()

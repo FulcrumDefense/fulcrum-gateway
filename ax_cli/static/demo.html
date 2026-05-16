@@ -154,6 +154,7 @@
     .type-mark { width: 34px; height: 34px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--muted); }
     .type-mark svg { width: 20px; height: 20px; display: block; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .type-mark.type-ollama { color: #4ade80; border-color: rgba(74, 222, 128, 0.32); background: rgba(74, 222, 128, 0.1); }
+    .type-mark.type-demand { color: #fb7185; border-color: rgba(251, 113, 133, 0.34); background: rgba(251, 113, 133, 0.1); }
     .type-mark.type-hermes { color: #7dd3fc; border-color: rgba(125, 211, 252, 0.34); background: rgba(125, 211, 252, 0.1); }
     .type-mark.type-pass { color: #facc15; border-color: rgba(250, 204, 21, 0.34); background: rgba(250, 204, 21, 0.1); }
     .type-mark.type-channel { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.34); background: rgba(196, 181, 253, 0.1); }
@@ -230,6 +231,26 @@
     .status-detail { padding: 12px 14px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--line); color: var(--muted); font-size: 13px; line-height: 1.5; }
     .status-detail.warning { border-color: rgba(251, 191, 36, 0.3); background: rgba(251, 191, 36, 0.06); color: var(--text); }
     .status-detail.error { border-color: rgba(251, 113, 133, 0.3); background: rgba(251, 113, 133, 0.06); color: var(--text); }
+    .inbox-panel { border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,0.025); overflow: hidden; }
+    .inbox-panel.has-work { border-color: rgba(125,211,252,0.28); background: rgba(125,211,252,0.035); }
+    .inbox-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    .inbox-panel-title { color: var(--text); font-size: 13px; font-weight: 600; }
+    .inbox-panel-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .inbox-link { appearance: none; border: 0; background: transparent; color: var(--accent-2); cursor: pointer; font: 12px/1.2 var(--mono); padding: 0; }
+    .inbox-link:hover { color: var(--accent); }
+    .inbox-muted { padding: 12px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .inbox-message { border-top: 1px solid var(--line); }
+    .inbox-message:first-child { border-top: 0; }
+    .inbox-message summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 12px; cursor: pointer; list-style: none; }
+    .inbox-message summary::-webkit-details-marker { display: none; }
+    .inbox-message summary:hover { background: rgba(255,255,255,0.03); }
+    .inbox-message-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .inbox-message-sender { color: var(--text); font-weight: 600; font-size: 13px; white-space: nowrap; }
+    .inbox-message-preview { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .inbox-message-time { color: var(--muted-2); font: 11px/1.2 var(--mono); white-space: nowrap; }
+    .inbox-message-body { padding: 0 12px 12px; display: grid; gap: 10px; }
+    .inbox-message-content { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font: 12px/1.55 var(--mono); padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,0.18); }
+    .inbox-message-meta { display: flex; flex-wrap: wrap; gap: 6px; }
 
     .pin-toggle { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.03); cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
     .pin-toggle:hover { border-color: var(--line-strong); }
@@ -519,6 +540,7 @@
       drawerActivity: [],
       drawerActivityKey: "",
       drawerPollHandle: null,
+      drawerInboxUnreadOnly: true,
       rowsByName: new Map(),
       lastRenderMode: null, // "disconnected" | "connect" | "list"
       showSystemAgents: false,
@@ -581,6 +603,9 @@
         '<rect x="5" y="5" width="14" height="14" rx="3"></rect>',
         '<path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"></path>',
         '<path d="M9 12h6"></path>',
+      ],
+      demand: [
+        '<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"></path>',
       ],
       hermes: [
         '<path d="M12 18v3"></path>',
@@ -652,19 +677,65 @@
       return String(agent.template_label || agent.runtime_type || "Custom");
     }
 
+    function publicAgentTypeLabel(agent) {
+      const descriptor = agent && typeof agent.asset_descriptor === "object" ? agent.asset_descriptor : null;
+      const label = String(agent.asset_type_label || descriptor?.type_label || "").trim();
+      return label || null;
+    }
+
+    function publicAgentTypeMeta(label) {
+      const normalized = String(label || "").toLowerCase();
+      if (!normalized) return null;
+      if (normalized.includes("on-demand")) return { icon: "demand", label, className: "type-demand" };
+      if (normalized.includes("pass-through")) return { icon: "pass", label, className: "type-pass" };
+      if (normalized.includes("live listener")) return { icon: "channel", label, className: "type-channel" };
+      if (normalized.includes("inbox")) return { icon: "inbox", label, className: "type-inbox" };
+      return { icon: "custom", label, className: "type-custom" };
+    }
+
     function agentTypeMeta(agent, sys) {
       if (sys) return { icon: "system", label: "System", className: "type-inbox" };
       const template = String(agent.template_id || "").toLowerCase();
       const runtime = String(agent.runtime_type || "").toLowerCase();
       const intake = String(agent.intake_model || "").toLowerCase();
-      if (template === "ollama") return { icon: "ollama", label: "Ollama", className: "type-ollama" };
-      if (template === "hermes" || runtime === "hermes_sentinel") return { icon: "hermes", label: "Hermes", className: "type-hermes" };
-      if (template === "pass_through" || agent.local_connection_mode === "pass_through") return { icon: "pass", label: "Pass-through", className: "type-pass" };
-      if (template === "claude_code_channel") return { icon: "channel", label: "Claude Code", className: "type-channel" };
-      if (template === "sentinel_cli") return { icon: "sentinel", label: "Sentinel CLI", className: "type-hermes" };
-      if (template === "echo_test" || runtime === "echo") return { icon: "echo", label: "Echo", className: "type-echo" };
-      if (template === "inbox" || intake === "queue_accept" || runtime === "inbox") return { icon: "inbox", label: "Inbox", className: "type-inbox" };
-      return { icon: "custom", label: templateLabel(agent), className: "type-custom" };
+      const mode = String(agent.mode || agent.activation || "").toLowerCase();
+      const publicLabel = publicAgentTypeLabel(agent);
+
+      // Resolve the specific runtime first (Hermes, Claude Code, Ollama, ...)
+      // so the row shows the actual driver. The public role label
+      // (Live Listener / Pass-through / Inbox / On-Demand) is folded into
+      // the tooltip so operators see both pieces of context at a glance.
+      let resolved = null;
+      if (template === "ollama") resolved = { icon: "ollama", label: "Ollama", className: "type-ollama" };
+      else if (template === "hermes" || runtime === "hermes_sentinel") resolved = { icon: "hermes", label: "Hermes", className: "type-hermes" };
+      else if (template === "claude_code_channel") resolved = { icon: "channel", label: "Claude Code", className: "type-channel" };
+      else if (template === "pass_through" || agent.local_connection_mode === "pass_through") resolved = { icon: "pass", label: "Pass-through", className: "type-pass" };
+      else if (template === "sentinel_cli") resolved = { icon: "sentinel", label: "Sentinel CLI", className: "type-hermes" };
+      else if (template === "echo_test" || runtime === "echo") resolved = { icon: "echo", label: "Echo", className: "type-echo" };
+      else if (template === "inbox" || intake === "queue_accept" || runtime === "inbox") resolved = { icon: "inbox", label: "Inbox", className: "type-inbox" };
+
+      // Fall back to the public role abstraction (Live Listener / etc.)
+      // when we don't have a specific runtime mapped — this is what catches
+      // newer / custom templates the operator hasn't taught the UI about yet.
+      if (!resolved) {
+        const publicType = publicAgentTypeMeta(publicLabel);
+        if (publicType) resolved = publicType;
+      }
+      if (!resolved) {
+        if (intake === "launch_on_send" || mode.includes("on-demand")) resolved = { icon: "demand", label: "On-Demand Agent", className: "type-demand" };
+        else if (intake === "live_listener") resolved = { icon: "channel", label: "Live Listener", className: "type-channel" };
+        else if (intake === "polling_mailbox") resolved = { icon: "pass", label: "Pass-through Agent", className: "type-pass" };
+        else resolved = { icon: "custom", label: templateLabel(agent), className: "type-custom" };
+      }
+
+      // Tooltip carries the runtime + role pair: e.g. "Hermes · Live Listener".
+      // Keeps the row label tight while making the role visible on hover.
+      if (publicLabel && publicLabel.toLowerCase() !== resolved.label.toLowerCase()) {
+        resolved = { ...resolved, tooltip: `${resolved.label} · ${publicLabel}` };
+      } else {
+        resolved = { ...resolved, tooltip: resolved.label };
+      }
+      return resolved;
     }
 
     function looksLikeSpaceId(value) {
@@ -763,10 +834,23 @@
       const reason = String(agent.confidence_reason || "").toLowerCase();
       const approval = String(agent.approval_state || "").toLowerCase();
       const detail = String(agent.confidence_detail || "").trim();
+      const externalKind = String(agent.external_runtime_kind || "").toLowerCase();
+      const externalManaged = Boolean(agent.external_runtime_managed || externalKind);
+      const externalState = String(agent.external_runtime_state || "").toLowerCase();
       const counts = mailboxCounts(agent);
       const unread = counts.messages;
       const tasks = counts.tasks;
 
+      if (externalManaged && !agent.connected) {
+        const stopped = desired === "stopped" || ["offline", "stopped", "disconnected"].includes(externalState);
+        const kindLabel = externalKind === "hermes_plugin" ? "Hermes plugin" : "External runtime";
+        const externalDetail = String(agent.local_attach_detail || "").trim();
+        return {
+          label: stopped ? "Plugin stopped" : "Plugin not attached",
+          tone: "warning",
+          detail: externalDetail || `${kindLabel} has not sent a fresh Gateway heartbeat. Start the plugin process to receive messages.`,
+        };
+      }
       // Operator intent overrides observed presence — if the user hit Stop,
       // the agent should read "Stopped" immediately, even if a stale heartbeat
       // is still draining out of the system.
@@ -1071,6 +1155,28 @@
         if (button) {
           button.disabled = false;
           button.textContent = "Start";
+        }
+      }
+    }
+
+    async function markManuallyAttached(agent, button) {
+      if (!agent || !agent.name) return;
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Marking…";
+      }
+      try {
+        await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/manual-attach", {
+          note: "Operator confirmed this attached session is already running.",
+        });
+        showToast("Marked @" + agent.name + " active", "ok");
+        await loadStatus();
+        await loadAgentDetail(agent.name);
+      } catch (err) {
+        showToast(err.message || "Manual attach failed", "err");
+        if (button) {
+          button.disabled = false;
+          button.textContent = "Mark attached";
         }
       }
     }
@@ -1585,15 +1691,17 @@
       if (nameEl.textContent !== newName) nameEl.textContent = newName;
       const sys = isSystemAgent(agent);
       const type = agentTypeMeta(agent, sys);
+      const tooltip = type.tooltip || type.label;
       typeMarkEl.className = "type-mark " + type.className;
-      typeMarkEl.title = type.label;
-      typeMarkEl.setAttribute("aria-label", type.label);
+      typeMarkEl.title = tooltip;
+      typeMarkEl.setAttribute("aria-label", tooltip);
       if (typeMarkEl.dataset.icon !== type.icon) {
         clearChildren(typeMarkEl);
         typeMarkEl.appendChild(typeIcon(type.icon, type.label));
         typeMarkEl.dataset.icon = type.icon;
       }
       if (typeLabelEl.textContent !== type.label) typeLabelEl.textContent = type.label;
+      if (typeLabelEl.title !== tooltip) typeLabelEl.title = tooltip;
       const activity = lastActivityLabel(agent);
       lastSeenEl.className = "row-last-seen" + (activity.fresh ? " fresh" : "");
       if (lastSeenEl.textContent !== activity.text) lastSeenEl.textContent = activity.text;
@@ -1966,6 +2074,107 @@
       for (const r of state.rowsByName.values()) r.classList.remove("active-row");
     }
 
+    function messagePreview(message) {
+      const content = String(message.content || message.text || message.body || "").trim();
+      const firstLine = content.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "(empty message)";
+      return firstLine.length > 160 ? firstLine.slice(0, 157) + "..." : firstLine;
+    }
+
+    function messageSender(message) {
+      const raw = String(message.display_name || message.sender_name || message.agent_name || message.sender || "sender").trim();
+      if (!raw) return "@sender";
+      return raw.startsWith("@") ? raw : "@" + raw;
+    }
+
+    function messageAttachments(message) {
+      const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
+      const attachments = Array.isArray(metadata.attachments) ? metadata.attachments : Array.isArray(metadata.accepted_attachments) ? metadata.accepted_attachments : [];
+      return attachments.filter((item) => item && typeof item === "object");
+    }
+
+    function buildInboxMessage(message) {
+      const attachments = messageAttachments(message);
+      const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
+      const routing = metadata.routing_story && typeof metadata.routing_story === "object" ? metadata.routing_story : {};
+      return makeEl("details", { class: "inbox-message" }, [
+        makeEl("summary", {}, [
+          makeEl("div", { class: "inbox-message-title" }, [
+            makeEl("span", { class: "inbox-message-sender" }, [messageSender(message)]),
+            makeEl("span", { class: "inbox-message-preview" }, [messagePreview(message)]),
+            attachments.length ? makeEl("span", { class: "chip" }, ["Files " + attachments.length]) : null,
+          ]),
+          makeEl("span", { class: "inbox-message-time" }, [relativeActivity("", message.created_at || message.updated_at).text]),
+        ]),
+        makeEl("div", { class: "inbox-message-body" }, [
+          makeEl("div", { class: "inbox-message-content" }, [String(message.content || message.text || message.body || "") || "(empty message)"]),
+          attachments.length ? makeEl("div", { class: "inbox-message-meta" }, attachments.map((file) => {
+            const name = String(file.filename || file.name || "attachment");
+            const key = String(file.context_key || "").trim();
+            return makeEl("span", { class: "chip" }, [key ? `${name} · ${key}` : name]);
+          })) : null,
+          makeEl("div", { class: "inbox-message-meta" }, [
+            message.id ? makeEl("span", { class: "chip" }, ["Id " + String(message.id).slice(0, 8)]) : null,
+            message.channel ? makeEl("span", { class: "chip" }, ["Channel " + String(message.channel)]) : null,
+            message.message_type ? makeEl("span", { class: "chip" }, [String(message.message_type)]) : null,
+            Array.isArray(routing.summary) && routing.summary.length ? makeEl("span", { class: "chip" }, ["Route " + routing.summary.join(", ")]) : null,
+          ]),
+        ]),
+      ]);
+    }
+
+    function renderInboxSection(agent) {
+      const count = mailboxCounts(agent).messages;
+      const panel = makeEl("div", { class: "inbox-panel" + (count ? " has-work" : ""), id: "drawer-inbox-panel" }, [
+        makeEl("div", { class: "inbox-panel-head" }, [
+          makeEl("div", { class: "inbox-panel-title" }, [count === 1 ? "1 unread message" : count > 1 ? `${count} unread messages` : "Mailbox"]),
+          makeEl("div", { class: "inbox-panel-actions" }, [
+            makeEl("button", {
+              type: "button",
+              class: "inbox-link",
+              onclick: () => {
+                state.drawerInboxUnreadOnly = !state.drawerInboxUnreadOnly;
+                const current = findAgent(state.drawerAgentName);
+                if (current) panel.closest(".drawer-section").replaceWith(renderInboxSection(current));
+              },
+            }, [state.drawerInboxUnreadOnly ? "Show all" : "Unread only"]),
+            makeEl("button", {
+              type: "button",
+              class: "inbox-link",
+              onclick: () => loadDrawerInbox(agent, panel),
+            }, ["Refresh"]),
+          ]),
+        ]),
+        makeEl("div", { class: "inbox-muted", id: "drawer-inbox-content" }, ["Loading messages..."]),
+      ]);
+      window.setTimeout(() => loadDrawerInbox(agent, panel), 0);
+      return makeEl("section", { class: "drawer-section" }, [
+        makeEl("div", { class: "drawer-label" }, ["Mailbox"]),
+        panel,
+      ]);
+    }
+
+    async function loadDrawerInbox(agent, panel) {
+      const content = panel.querySelector("#drawer-inbox-content");
+      if (!content) return;
+      content.textContent = "Loading messages...";
+      try {
+        const params = new URLSearchParams({ limit: "20" });
+        if (state.drawerInboxUnreadOnly) params.set("unread_only", "true");
+        const payload = await api("GET", "/api/agents/" + encodeURIComponent(agent.name) + "/inbox?" + params.toString());
+        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        clearChildren(content);
+        content.className = messages.length ? "" : "inbox-muted";
+        if (!messages.length) {
+          content.textContent = state.drawerInboxUnreadOnly ? "No unread messages." : "No messages found.";
+          return;
+        }
+        for (const message of messages) content.appendChild(buildInboxMessage(message));
+      } catch (err) {
+        content.className = "inbox-muted";
+        content.textContent = err.message || "Mailbox failed to load.";
+      }
+    }
+
     function refreshDrawer() {
       const agent = findAgent(state.drawerAgentName);
       if (!agent) {
@@ -1995,6 +2204,8 @@
         }, [status.label]),
         statusBox,
       ]));
+
+      drawerBody.appendChild(renderInboxSection(agent));
 
       // Meta section
       const meta = makeEl("div", { class: "drawer-meta" }, [
@@ -2131,6 +2342,12 @@
       const desiredRunning = String(agent.desired_state || "").toLowerCase() !== "stopped";
       const needsApproval = String(agent.approval_state || "").toLowerCase() === "pending" && agent.approval_id;
       const sendLock = sendAvailability(agent);
+      const attachedNeedsOperator =
+        isAttachedRuntime(agent) &&
+        !agent.connected &&
+        (String(agent.presence || "").toUpperCase() === "STALE" ||
+          String(agent.presence || "").toUpperCase() === "OFFLINE" ||
+          String(agent.reachability || "").toLowerCase() === "attach_required");
       const actions = makeEl("div", { class: "drawer-actions" });
       if (needsApproval) {
         actions.appendChild(makeEl("div", { class: "approval-actions" }, [
@@ -2196,12 +2413,17 @@
         makeEl("div", { class: "message-composer-actions" }, [sendButton, resetButton]),
       ]));
       if (desiredRunning) {
-        if (isAttachedRuntime(agent) && String(agent.presence || "").toUpperCase() === "STALE") {
+        if (attachedNeedsOperator) {
           const startButton = makeEl("button", {
             class: "btn btn-primary",
             onclick: (event) => attachAgent(agent, event.currentTarget),
           }, ["Start"]);
-          actions.appendChild(makeEl("div", { class: "message-composer-actions" }, [startButton]));
+          const manualButton = makeEl("button", {
+            class: "btn btn-ghost",
+            title: "Use this when the Claude Code session is already attached outside Gateway.",
+            onclick: (event) => markManuallyAttached(agent, event.currentTarget),
+          }, ["Mark attached"]);
+          actions.appendChild(makeEl("div", { class: "message-composer-actions" }, [startButton, manualButton]));
         } else {
           actions.appendChild(makeEl("button", {
             class: "btn btn-ghost",

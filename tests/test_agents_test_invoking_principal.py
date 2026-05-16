@@ -62,15 +62,14 @@ def _seed_session_and_registry(tmp_path, monkeypatch, *, extra_agents=()):
     registry = gateway_core.load_gateway_registry()
     registry["agents"] = agents
     for entry in registry["agents"]:
-        gateway_core.ensure_gateway_identity_binding(
-            registry, entry, session=gateway_core.load_gateway_session()
-        )
+        gateway_core.ensure_gateway_identity_binding(registry, entry, session=gateway_core.load_gateway_session())
     gateway_core.save_gateway_registry(registry)
 
 
 def _passthrough_send_guard(monkeypatch):
     """Stub `_identity_space_send_guard` so credential-confidence checks do not
     block sender-routing tests. The guard's behavior is verified elsewhere."""
+
     def fake(entry, *, explicit_space_id=None):
         return {
             "active_space_id": str(entry.get("space_id") or "space-1"),
@@ -254,9 +253,7 @@ def test_explicit_sender_agent_overrides_invoking_principal(tmp_path, monkeypatc
     _passthrough_send_guard(monkeypatch)
     sent, sender_seen = _install_recording_client(monkeypatch)
 
-    result = gateway_cmd._send_gateway_test_to_managed_agent(
-        "target_agent", sender_agent="switchboard-space1"
-    )
+    result = gateway_cmd._send_gateway_test_to_managed_agent("target_agent", sender_agent="switchboard-space1")
 
     assert result.get("sender_agent") == "switchboard-space1"
     assert "switchboard-space1" in sender_seen
@@ -278,9 +275,7 @@ def test_explicit_sender_agent_works_even_without_invoking_principal(tmp_path, m
     _passthrough_send_guard(monkeypatch)
     sent, sender_seen = _install_recording_client(monkeypatch)
 
-    result = gateway_cmd._send_gateway_test_to_managed_agent(
-        "target_agent", sender_agent="switchboard-space1"
-    )
+    result = gateway_cmd._send_gateway_test_to_managed_agent("target_agent", sender_agent="switchboard-space1")
 
     assert result.get("sender_agent") == "switchboard-space1"
 
@@ -302,10 +297,6 @@ def test_resolve_invoking_principal_returns_none_when_no_gateway_config(tmp_path
 def test_resolve_invoking_principal_returns_none_when_gateway_config_lacks_agent_name(tmp_path, monkeypatch):
     local_ax = tmp_path / ".ax"
     local_ax.mkdir()
-    (local_ax / "config.toml").write_text(
-        "[gateway]\n"
-        'mode = "local"\n'
-        'url = "http://127.0.0.1:8765"\n'
-    )
+    (local_ax / "config.toml").write_text('[gateway]\nmode = "local"\nurl = "http://127.0.0.1:8765"\n')
     monkeypatch.chdir(tmp_path)
     assert gateway_cmd._resolve_invoking_principal() is None

@@ -8,6 +8,7 @@ The fix in ax_cli/gateway.py::_build_sentinel_claude_cmd was already landed
 (see the cmd list there). This module locks the same behavior on the two
 remaining call sites that vendor the Hermes runtime.
 """
+
 from __future__ import annotations
 
 import inspect

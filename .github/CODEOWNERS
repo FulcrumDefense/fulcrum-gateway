@@ -2,7 +2,7 @@
 # These owners are automatically requested for review on PRs.
 
 # Default owner — all files
-* @madtank @anvil
+* @madtank @sarob
 
 # CI/CD and publishing
 .github/ @madtank

@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+import typer
 from typer.testing import CliRunner
 
 from ax_cli import gateway as gateway_core
@@ -163,6 +165,151 @@ def test_channel_reply_preserves_explicit_mentions_for_routing():
     )
 
     assert client.sent[0]["metadata"]["mentions"] == ["nemotron"]
+
+
+# --- Inbox bundling on channel reply (aX task 663d9e6f) -------------------
+
+
+class _InboxClient(FakeClient):
+    """FakeClient that also supports list_messages so the inbox poll lands."""
+
+    def __init__(self, *, list_messages_response, **kwargs):
+        super().__init__(**kwargs)
+        self._list_messages_response = list_messages_response
+        self.list_messages_calls: list[dict] = []
+
+    def list_messages(
+        self, *, limit=None, space_id=None, agent_id=None, unread_only=None, mark_read=None, channel=None
+    ):
+        self.list_messages_calls.append(
+            {
+                "limit": limit,
+                "space_id": space_id,
+                "agent_id": agent_id,
+                "unread_only": unread_only,
+                "mark_read": mark_read,
+                "channel": channel,
+            }
+        )
+        return self._list_messages_response
+
+
+def _send_response_for(bridge: CaptureBridge) -> dict:
+    """Return the response payload the bridge wrote for the most recent reply."""
+    for payload in reversed(bridge.writes):
+        if isinstance(payload, dict) and payload.get("result") and "content" in payload["result"]:
+            return payload["result"]
+    raise AssertionError("no MCP response written")
+
+
+def test_channel_reply_bundles_unread_inbox_in_response_by_default():
+    """Default ON: a reply should return what arrived while the agent was drafting."""
+    inbox_response = {
+        "messages": [
+            {"id": "m-1", "content": "@peer-agent ping from alex", "agent_name": "alex"},
+            {"id": "m-2", "content": "@peer-agent follow-up", "agent_name": "alex"},
+        ],
+        "unread_count": 2,
+    }
+    client = _InboxClient(list_messages_response=inbox_response)
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(
+        bridge.handle_tool_call(
+            1,
+            {"name": "reply", "arguments": {"text": "thanks!", "inbox_wait": 0}},
+        )
+    )
+
+    assert client.sent[0]["content"] == "thanks!"
+    assert client.list_messages_calls, "list_messages must run on the post-reply inbox poll"
+    assert client.list_messages_calls[0]["unread_only"] is True
+    assert client.list_messages_calls[0]["mark_read"] is True
+    assert client.list_messages_calls[0]["agent_id"] == "agent-123"
+
+    response = _send_response_for(bridge)
+    assert len(response["content"]) == 2  # send confirmation + inbox bundle
+    inbox_text = response["content"][1]["text"]
+    assert "INBOX while you were drafting" in inbox_text
+    assert "2 unread message(s)" in inbox_text
+    assert "@alex" in inbox_text
+    assert "ping from alex" in inbox_text
+
+
+def test_channel_reply_skips_inbox_when_arg_is_false():
+    """`inbox: false` opts out of the post-reply poll entirely."""
+    client = _InboxClient(list_messages_response={"messages": [], "unread_count": 0})
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(
+        bridge.handle_tool_call(
+            1,
+            {"name": "reply", "arguments": {"text": "no inbox please", "inbox": False}},
+        )
+    )
+
+    assert not client.list_messages_calls, "inbox=false must skip the post-reply poll"
+    response = _send_response_for(bridge)
+    assert len(response["content"]) == 1  # just the send confirmation, no inbox item
+
+
+def test_channel_reply_omits_inbox_section_when_no_unread():
+    """No unread messages → response stays single-item, not noisy."""
+    client = _InboxClient(list_messages_response={"messages": [], "unread_count": 0})
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(
+        bridge.handle_tool_call(
+            1,
+            {"name": "reply", "arguments": {"text": "quiet send", "inbox_wait": 0}},
+        )
+    )
+
+    assert client.list_messages_calls, "poll still runs to verify quiet"
+    response = _send_response_for(bridge)
+    assert len(response["content"]) == 1
+
+
+def test_format_inbox_bundle_for_mcp_caps_at_five():
+    """The render helper truncates long inbox lists to keep the MCP item compact."""
+    bundle = {
+        "agent": "peer-agent",
+        "messages": [{"id": f"m-{i}", "content": f"msg {i}", "agent_name": "alex"} for i in range(10)],
+        "unread_count": 10,
+    }
+    text = channel_mod._format_inbox_bundle_for_mcp(bundle)
+    assert "10 unread message(s)" in text
+    # 5 visible items + 1 "and N more" line.
+    assert text.count("@alex") == 5
+    assert "and 5 more" in text
+
+
+def test_channel_reply_shows_inbox_error_when_poll_fails():
+    """If list_messages raises, the response still ships the send confirmation
+    plus a `(inbox poll failed: ...)` line so the agent knows something missed."""
+
+    class _RaisingClient(FakeClient):
+        def list_messages(self, **_kwargs):
+            raise RuntimeError("upstream 503")
+
+    client = _RaisingClient()
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(
+        bridge.handle_tool_call(
+            1,
+            {"name": "reply", "arguments": {"text": "even on error", "inbox_wait": 0}},
+        )
+    )
+
+    response = _send_response_for(bridge)
+    assert len(response["content"]) == 2
+    assert "inbox poll failed" in response["content"][1]["text"]
+    assert "upstream 503" in response["content"][1]["text"]
 
 
 def test_channel_can_publish_working_status_on_delivery():
@@ -799,7 +946,7 @@ def test_default_local_channel_command_resolves_relative_argv0(monkeypatch, tmp_
     so a relative command crashes the MCP server immediately."""
     venv_bin = tmp_path / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
-    (venv_bin / "ax").write_text("#!/bin/sh\nexec axctl \"$@\"\n")
+    (venv_bin / "ax").write_text('#!/bin/sh\nexec axctl "$@"\n')
     (venv_bin / "axctl").write_text("#!/bin/sh\necho ok\n")
     (venv_bin / "ax").chmod(0o755)
     (venv_bin / "axctl").chmod(0o755)
@@ -904,9 +1051,7 @@ def test_marker_section_preserves_user_content_in_claude_md(tmp_path):
         "runtime_type": "claude_code_channel",
         "system_prompt": "Operator role text.",
     }
-    _write_marker_section(
-        workdir / "CLAUDE.md", body=_render_agent_persona_markdown(entry, workdir=str(workdir))
-    )
+    _write_marker_section(workdir / "CLAUDE.md", body=_render_agent_persona_markdown(entry, workdir=str(workdir)))
     final = (workdir / "CLAUDE.md").read_text()
     # Marker section appears.
     assert "BEGIN ax-gateway-agent-context" in final
@@ -1277,6 +1422,7 @@ def test_channel_setup_uses_gateway_registry_defaults(monkeypatch, tmp_path):
 def test_channel_setup_can_generate_docker_mcp_command(tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("axp_a_agent.secret\n")
+    env_path = tmp_path / "orion.env"
 
     result = runner.invoke(
         channel_mod.app,
@@ -1293,6 +1439,8 @@ def test_channel_setup_can_generate_docker_mcp_command(tmp_path):
             "docker",
             "--container-image",
             "ax-channel:demo",
+            "--env-path",
+            str(env_path),
             "--json",
         ],
     )
@@ -1304,3 +1452,638 @@ def test_channel_setup_can_generate_docker_mcp_command(tmp_path):
     assert "ax-channel:demo" in server["args"]
     assert "-i" in server["args"]
     assert "axctl" in server["args"]
+    assert env_path.exists()
+
+
+# ---- Helper function unit tests ----
+
+
+def test_env_line_escapes_special_chars():
+    """_env_line should escape backslashes and double quotes."""
+    line = channel_mod._env_line("KEY", 'value with "quotes" and \\backslash')
+    assert 'KEY="value with \\"quotes\\" and \\\\backslash"' == line
+
+
+def test_env_line_strips_newlines():
+    """_env_line replaces newlines with spaces."""
+    line = channel_mod._env_line("KEY", "line1\nline2\nline3")
+    assert "\n" not in line
+    assert "line1 line2 line3" in line
+
+
+def test_env_line_empty_value():
+    line = channel_mod._env_line("KEY", "")
+    assert line == 'KEY=""'
+
+
+def test_env_line_none_value():
+    line = channel_mod._env_line("KEY", None)
+    assert line == 'KEY=""'
+
+
+def test_write_channel_env_creates_file_with_permissions(tmp_path):
+    """_write_channel_env should create the file with 0o600 permissions."""
+    env_path = tmp_path / "sub" / "channel.env"
+    channel_mod._write_channel_env(env_path, {"AX_TOKEN": "test_tok", "AX_BASE_URL": "https://paxai.app"})
+    assert env_path.exists()
+    assert env_path.stat().st_mode & 0o777 == 0o600
+    text = env_path.read_text()
+    assert "AX_TOKEN=" in text
+    assert "AX_BASE_URL=" in text
+    assert "Generated by ax channel setup" in text
+
+
+def test_write_channel_env_skips_empty_values(tmp_path):
+    env_path = tmp_path / "channel.env"
+    channel_mod._write_channel_env(env_path, {"AX_TOKEN": "tok", "AX_EMPTY": ""})
+    text = env_path.read_text()
+    assert "AX_TOKEN=" in text
+    assert "AX_EMPTY" not in text
+
+
+def test_load_channel_env_nonexistent_file(tmp_path):
+    """Loading a non-existent env file should be a no-op."""
+    channel_mod._load_channel_env(tmp_path / "nonexistent.env")
+
+
+def test_load_channel_env_skips_comments_and_blank_lines(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("# this is a comment\n\nAX_SPACE_ID=space-test\nNO_EQUALS_LINE\n")
+    channel_mod._load_channel_env(env_file)
+    assert os.environ.get("AX_SPACE_ID") == "space-test"
+
+
+def test_load_channel_env_strips_quotes(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text('AX_TEST_VAR="quoted_value"\n')
+    channel_mod._load_channel_env(env_file)
+    assert os.environ.get("AX_TEST_VAR") == "quoted_value"
+
+
+def test_load_mcp_config_returns_empty_for_missing(tmp_path):
+    result = channel_mod._load_mcp_config(tmp_path / "nonexistent.json")
+    assert result == {}
+
+
+def test_load_mcp_config_raises_on_invalid_json(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json at all")
+    with pytest.raises(typer.BadParameter, match="not valid JSON"):
+        channel_mod._load_mcp_config(bad)
+
+
+def test_load_mcp_config_raises_on_non_object(tmp_path):
+    arr = tmp_path / "array.json"
+    arr.write_text("[1, 2, 3]")
+    with pytest.raises(typer.BadParameter, match="must contain a JSON object"):
+        channel_mod._load_mcp_config(arr)
+
+
+def test_write_mcp_server_config_creates_new_file(tmp_path):
+    mcp_path = tmp_path / "sub" / ".mcp.json"
+    channel_mod._write_mcp_server_config(mcp_path, "test-server", {"command": "axctl", "args": ["channel"]})
+    config = json.loads(mcp_path.read_text())
+    assert config["mcpServers"]["test-server"]["command"] == "axctl"
+
+
+def test_write_mcp_server_config_appends_to_existing(tmp_path):
+    mcp_path = tmp_path / ".mcp.json"
+    mcp_path.write_text(json.dumps({"mcpServers": {"existing": {"command": "other"}}}))
+    channel_mod._write_mcp_server_config(mcp_path, "new-server", {"command": "axctl", "args": ["channel"]})
+    config = json.loads(mcp_path.read_text())
+    assert "existing" in config["mcpServers"]
+    assert "new-server" in config["mcpServers"]
+
+
+def test_write_mcp_server_config_raises_on_non_dict_servers(tmp_path):
+    mcp_path = tmp_path / ".mcp.json"
+    mcp_path.write_text(json.dumps({"mcpServers": "not a dict"}))
+    with pytest.raises(typer.BadParameter, match="non-object mcpServers"):
+        channel_mod._write_mcp_server_config(mcp_path, "test", {"command": "axctl"})
+
+
+def test_default_channel_env_path_uses_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CHANNEL_ENV_FILE", str(tmp_path / "custom.env"))
+    result = channel_mod._default_channel_env_path()
+    assert result == tmp_path / "custom.env"
+
+
+def test_default_channel_env_path_fallback(monkeypatch):
+    monkeypatch.delenv("AX_CHANNEL_ENV_FILE", raising=False)
+    result = channel_mod._default_channel_env_path()
+    assert result == channel_mod.CHANNEL_ENV_PATH
+
+
+# ---- ChannelBridge method tests ----
+
+
+def test_channel_send_error_method():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.send_error(42, -32601, "Method not found"))
+
+    assert bridge.writes == [{"jsonrpc": "2.0", "id": 42, "error": {"code": -32601, "message": "Method not found"}}]
+
+
+def test_channel_handle_unknown_tool():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_tool_call(1, {"name": "unknown_tool", "arguments": {}}))
+
+    assert bridge.writes[0]["error"]["code"] == -32601
+    assert "Unknown tool" in bridge.writes[0]["error"]["message"]
+
+
+def test_channel_reply_requires_text():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(bridge.handle_tool_call(1, {"name": "reply", "arguments": {"text": ""}}))
+
+    assert bridge.writes[0]["error"]["code"] == -32602
+    assert "reply.text is required" in bridge.writes[0]["error"]["message"]
+
+
+def test_channel_reply_requires_message_id():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    # _last_message_id is None
+
+    asyncio.run(bridge.handle_tool_call(1, {"name": "reply", "arguments": {"text": "hello"}}))
+
+    assert bridge.writes[0]["error"]["code"] == -32602
+    assert "reply_to is required" in bridge.writes[0]["error"]["message"]
+
+
+def test_channel_reply_rejects_no_agent_id():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client, agent_id=None)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(bridge.handle_tool_call(1, {"name": "reply", "arguments": {"text": "hello"}}))
+
+    result = bridge.writes[0]["result"]
+    assert result["isError"] is True
+    assert "agent_id is required" in result["content"][0]["text"]
+
+
+def test_channel_reply_uses_explicit_reply_to():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "default-msg"
+
+    asyncio.run(
+        bridge.handle_tool_call(
+            1,
+            {"name": "reply", "arguments": {"text": "hello", "reply_to": "explicit-msg"}},
+        )
+    )
+
+    assert client.sent[0]["parent_id"] == "explicit-msg"
+
+
+def test_channel_handle_initialize():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_initialize(1))
+
+    result = bridge.writes[0]["result"]
+    assert result["protocolVersion"] == channel_mod.PROTOCOL_VERSION
+    assert result["serverInfo"]["name"] == channel_mod.SERVER_NAME
+    assert "tools" in result["capabilities"]
+
+
+def test_channel_handle_ping(monkeypatch):
+    monkeypatch.setattr(channel_mod, "_touch_gateway_channel_entry", lambda *a, **kw: None)
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_request({"id": 1, "method": "ping"}))
+
+    assert bridge.writes[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
+def test_channel_handle_unknown_method():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_request({"id": 1, "method": "unknown/method"}))
+
+    assert bridge.writes[0]["error"]["code"] == -32601
+
+
+def test_channel_handle_notification_initialized():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    assert not bridge.initialized.is_set()
+
+    asyncio.run(bridge.handle_notification({"method": "notifications/initialized"}))
+
+    assert bridge.initialized.is_set()
+
+
+def test_channel_handle_notification_cancelled():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    # Should not raise
+    asyncio.run(bridge.handle_notification({"method": "notifications/cancelled"}))
+
+
+def test_channel_handle_notification_unknown():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    # Should not raise
+    asyncio.run(bridge.handle_notification({"method": "some/unknown/method"}))
+
+
+def test_channel_get_messages_no_pending():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_get_messages(1, {"limit": 5}))
+
+    result = bridge.writes[0]["result"]
+    assert result["content"][0]["text"] == "No pending messages."
+
+
+def test_channel_get_messages_invalid_limit():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_get_messages(1, {"limit": "not_a_number"}))
+
+    # Falls back to limit=10, returns "No pending messages."
+    result = bridge.writes[0]["result"]
+    assert "No pending" in result["content"][0]["text"]
+
+
+def test_channel_get_messages_mark_read_false():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    bridge._pending_mentions.append(
+        MentionEvent(
+            message_id="m1",
+            parent_id=None,
+            conversation_id=None,
+            author="alex",
+            prompt="check",
+            raw_content="@peer-agent check",
+            created_at=None,
+            space_id="space-123",
+        )
+    )
+
+    asyncio.run(bridge.handle_get_messages(1, {"mark_read": False}))
+
+    # Mentions should NOT be removed when mark_read=False
+    assert len(bridge._pending_mentions) == 1
+
+
+def test_channel_log_noop_when_not_debug():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)  # debug=False
+    # Should not raise
+    bridge.log("test message")
+
+
+def test_channel_enqueue_from_thread_drops_when_shutdown(monkeypatch):
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    bridge.shutdown.set()
+
+    event = MentionEvent(
+        message_id="m1",
+        parent_id=None,
+        conversation_id=None,
+        author="alex",
+        prompt="hello",
+        raw_content="@peer-agent hello",
+        created_at=None,
+        space_id="space-123",
+    )
+    # Should not raise, just drop the event
+    bridge.enqueue_from_thread(event)
+
+
+# ---- string_value helper ----
+
+
+def test_string_value_returns_stripped_strings():
+    assert channel_mod._string_value("hello") == "hello"
+    assert channel_mod._string_value("  spaced  ") == "spaced"
+    assert channel_mod._string_value("") is None
+    assert channel_mod._string_value(None) is None
+    assert channel_mod._string_value(42) == "42"
+    assert channel_mod._string_value(3.14) == "3.14"
+    assert channel_mod._string_value([1, 2]) is None
+    assert channel_mod._string_value({"a": 1}) is None
+
+
+# ---- Format shared object ----
+
+
+def test_format_shared_object_with_context_key():
+    metadata = {
+        "forward": {
+            "resource_type": "context",
+            "context_key": "upload:file.txt:att-1",
+            "title": "A document",
+        }
+    }
+    result = channel_mod._format_shared_object(metadata, space_id="space-123")
+    assert "Shared object:" in result
+    assert "context_key: upload:file.txt:att-1" in result
+    assert "axctl context get" in result
+
+
+def test_format_shared_object_returns_none_for_no_forward():
+    assert channel_mod._format_shared_object({}, space_id="space-1") is None
+    assert channel_mod._format_shared_object(None, space_id="space-1") is None
+    assert channel_mod._format_shared_object({"forward": "not a dict"}, space_id="space-1") is None
+
+
+# ---- Format attachments ----
+
+
+def test_format_attachments_with_context_keys():
+    attachments = [
+        {
+            "id": "att-1",
+            "filename": "report.pdf",
+            "content_type": "application/pdf",
+            "context_key": "upload:report.pdf:att-1",
+        }
+    ]
+    result = channel_mod._format_attachments(attachments, space_id="space-123")
+    assert "Attachments:" in result
+    assert "report.pdf" in result
+    assert "application/pdf" in result
+    assert "context_key=upload:report.pdf:att-1" in result
+    assert "axctl context get" in result
+
+
+def test_format_attachments_returns_none_for_empty():
+    assert channel_mod._format_attachments([], space_id="s1") is None
+    assert channel_mod._format_attachments(None, space_id="s1") is None
+
+
+def test_format_attachments_skips_non_dict_entries():
+    result = channel_mod._format_attachments(["not a dict"], space_id="s1")
+    # Only the header line, no actual entries => still None (len(lines) <= 1)
+    assert result is None
+
+
+# ---- Enrich prompt for agent ----
+
+
+def test_enrich_prompt_no_extra_context():
+    result = channel_mod._enrich_prompt_for_agent(
+        "hello",
+        metadata=None,
+        attachments=None,
+        space_id="s1",
+    )
+    assert result == "hello"
+
+
+def test_enrich_prompt_with_attachments():
+    result = channel_mod._enrich_prompt_for_agent(
+        "check this",
+        metadata=None,
+        attachments=[{"id": "a1", "filename": "f.txt", "content_type": "text/plain"}],
+        space_id="s1",
+    )
+    assert "---" in result
+    assert "Attachments:" in result
+    assert "f.txt" in result
+
+
+# ---- Format inbox bundle for MCP ----
+
+
+def test_format_inbox_bundle_empty_messages():
+    bundle = {"agent": "test", "messages": [], "unread_count": 0}
+    text = channel_mod._format_inbox_bundle_for_mcp(bundle)
+    assert "0 unread message(s)" in text
+
+
+# ---- _resolve_agent_id ----
+
+
+def test_resolve_agent_id_finds_match():
+    class AgentsClient:
+        def list_agents(self):
+            return [{"name": "orion", "id": "agent-123"}, {"name": "other", "id": "agent-456"}]
+
+    assert channel_mod._resolve_agent_id(AgentsClient(), "orion") == "agent-123"
+    assert channel_mod._resolve_agent_id(AgentsClient(), "ORION") == "agent-123"  # case insensitive
+
+
+def test_resolve_agent_id_returns_none_for_no_match():
+    class AgentsClient:
+        def list_agents(self):
+            return [{"name": "other", "id": "agent-456"}]
+
+    assert channel_mod._resolve_agent_id(AgentsClient(), "orion") is None
+
+
+def test_resolve_agent_id_returns_none_on_exception():
+    class FailingClient:
+        def list_agents(self):
+            raise RuntimeError("API down")
+
+    assert channel_mod._resolve_agent_id(FailingClient(), "orion") is None
+
+
+def test_resolve_agent_id_returns_none_for_no_name():
+    assert channel_mod._resolve_agent_id(None, None) is None
+
+
+def test_resolve_agent_id_handles_dict_response():
+    class DictClient:
+        def list_agents(self):
+            return {"agents": [{"name": "orion", "id": "agent-123"}]}
+
+    assert channel_mod._resolve_agent_id(DictClient(), "orion") == "agent-123"
+
+
+# ---- write_channel_setup validation ----
+
+
+def test_write_channel_setup_requires_agent_name():
+    with pytest.raises(typer.BadParameter, match="Agent name is required"):
+        channel_mod.write_channel_setup(agent_name="", workdir=Path("/tmp"))
+
+
+def test_write_channel_setup_rejects_invalid_mode():
+    with pytest.raises(typer.BadParameter, match="--mode must be local or docker"):
+        channel_mod.write_channel_setup(
+            agent_name="test",
+            workdir=Path("/tmp"),
+            mode="kubernetes",
+        )
+
+
+def test_write_channel_setup_requires_space_id(monkeypatch):
+    """Without gateway registry, --space-id must be provided."""
+    import pytest
+
+    monkeypatch.setattr(channel_mod, "_gateway_agent_channel_defaults", lambda n: {})
+
+    with pytest.raises(typer.BadParameter, match="--space-id is required"):
+        channel_mod.write_channel_setup(
+            agent_name="test",
+            workdir=Path("/tmp"),
+            space_id=None,
+        )
+
+
+def test_write_channel_setup_requires_token_file(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(channel_mod, "_gateway_agent_channel_defaults", lambda n: {})
+
+    with pytest.raises(typer.BadParameter, match="--token-file is required"):
+        channel_mod.write_channel_setup(
+            agent_name="test",
+            workdir=Path("/tmp"),
+            space_id="space-1",
+            token_file=None,
+        )
+
+
+# ---- Docker mode MCP config ----
+
+
+def test_channel_mcp_server_config_docker_requires_image():
+    with pytest.raises(typer.BadParameter, match="--container-image is required"):
+        channel_mod._channel_mcp_server_config(
+            agent_name="test",
+            space_id="s1",
+            env_path=Path("/tmp/env"),
+            mode="docker",
+            container_image=None,
+            debug=False,
+        )
+
+
+def test_channel_mcp_server_config_local_with_debug():
+    config = channel_mod._channel_mcp_server_config(
+        agent_name="test",
+        space_id="s1",
+        env_path=Path("/tmp/env"),
+        mode="local",
+        container_image=None,
+        debug=True,
+    )
+    assert "--debug" in config["args"]
+    assert config["type"] == "stdio"
+
+
+# ---- Touch gateway channel entry ----
+
+
+def test_touch_gateway_channel_entry_no_op_on_missing_entry(monkeypatch):
+    """If agent is not in registry, touch is a no-op."""
+    monkeypatch.setattr(gateway_core, "load_gateway_registry", lambda: {"agents": []})
+    # Should not raise
+    channel_mod._touch_gateway_channel_entry("nonexistent-agent", event="test")
+
+
+def test_touch_gateway_channel_entry_no_op_on_exception(monkeypatch):
+    monkeypatch.setattr(
+        gateway_core, "load_gateway_registry", lambda: (_ for _ in ()).throw(RuntimeError("disk error"))
+    )
+    # Should not raise
+    channel_mod._touch_gateway_channel_entry("test-agent", event="test")
+
+
+# ---- Channel context hint ----
+
+
+def test_write_channel_context_hint_no_overwrite(tmp_path):
+    """_write_channel_context_hint should not overwrite existing files."""
+    hint_path = tmp_path / "AGENTS.md"
+    hint_path.write_text("# Existing content\n")
+
+    channel_mod._write_channel_context_hint(hint_path, agent_name="orion", context_path=Path(".ax/AGENT_CONTEXT.md"))
+    assert hint_path.read_text() == "# Existing content\n"
+
+
+def test_write_channel_context_hint_creates_new(tmp_path):
+    hint_path = tmp_path / "AGENTS.md"
+
+    channel_mod._write_channel_context_hint(hint_path, agent_name="orion", context_path=Path(".ax/AGENT_CONTEXT.md"))
+    text = hint_path.read_text()
+    assert "orion" in text
+    assert "AGENT_CONTEXT.md" in text
+
+
+# ---- Gateway agent channel defaults ----
+
+
+def test_gateway_agent_channel_defaults_returns_empty_on_exception(monkeypatch):
+    monkeypatch.setattr(
+        gateway_core,
+        "load_gateway_registry",
+        lambda: (_ for _ in ()).throw(RuntimeError("disk error")),
+    )
+    result = channel_mod._gateway_agent_channel_defaults("orion")
+    assert result == {}
+
+
+def test_gateway_agent_channel_defaults_returns_empty_for_unknown_agent(monkeypatch):
+    monkeypatch.setattr(
+        gateway_core,
+        "load_gateway_registry",
+        lambda: {"agents": [{"name": "other"}]},
+    )
+    result = channel_mod._gateway_agent_channel_defaults("nonexistent")
+    assert result == {}
+
+
+def test_gateway_agent_channel_defaults_returns_entry_fields(monkeypatch):
+    monkeypatch.setattr(
+        gateway_core,
+        "load_gateway_registry",
+        lambda: {
+            "agents": [
+                {
+                    "name": "orion",
+                    "agent_id": "agent-123",
+                    "space_id": "space-1",
+                    "base_url": "https://paxai.app",
+                    "token_file": "/tmp/token",
+                    "workdir": "/tmp/work",
+                }
+            ]
+        },
+    )
+    result = channel_mod._gateway_agent_channel_defaults("orion")
+    assert result["AX_AGENT_NAME"] == "orion"
+    assert result["AX_AGENT_ID"] == "agent-123"
+    assert result["AX_SPACE_ID"] == "space-1"
+    assert result["AX_TOKEN_FILE"] == "/tmp/token"
+
+
+# ---- _write_gateway_cli_config ----
+
+
+def test_write_gateway_cli_config(tmp_path):
+    config_path = tmp_path / ".ax" / "config.toml"
+    channel_mod._write_gateway_cli_config(
+        config_path,
+        agent_name="orion",
+        base_url="http://127.0.0.1:8765",
+        workdir=tmp_path,
+    )
+    text = config_path.read_text()
+    assert 'agent_name = "orion"' in text
+    assert 'mode = "local"' in text
+    assert config_path.stat().st_mode & 0o777 == 0o600

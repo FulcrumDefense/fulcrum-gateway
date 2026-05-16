@@ -1,4 +1,5 @@
 """Shared test fixtures for ax-cli."""
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,9 +9,17 @@ import pytest
 def clean_env(monkeypatch, tmp_path):
     """Ensure no leaked env vars affect tests. Use tmp_path for config."""
     for var in (
-        "AX_TOKEN", "AX_BASE_URL", "AX_AGENT_NAME", "AX_AGENT_ID",
-        "AX_SPACE_ID", "AX_ENV", "AX_USER_ENV", "AX_USER_TOKEN",
-        "AX_USER_BASE_URL", "AX_TOKEN_FILE", "AX_CONFIG_FILE",
+        "AX_TOKEN",
+        "AX_BASE_URL",
+        "AX_AGENT_NAME",
+        "AX_AGENT_ID",
+        "AX_SPACE_ID",
+        "AX_ENV",
+        "AX_USER_ENV",
+        "AX_USER_TOKEN",
+        "AX_USER_BASE_URL",
+        "AX_TOKEN_FILE",
+        "AX_CONFIG_FILE",
     ):
         monkeypatch.delenv(var, raising=False)
     # Point global config to an empty dir so real ~/.ax/ doesn't leak in
@@ -32,14 +41,16 @@ def config_dir(tmp_path):
 @pytest.fixture
 def write_config(config_dir):
     """Helper to write a config.toml with given key-value pairs."""
+
     def _write(**kwargs):
         lines = []
         for k, v in kwargs.items():
             if isinstance(v, str):
                 lines.append(f'{k} = "{v}"')
             else:
-                lines.append(f'{k} = {v}')
+                lines.append(f"{k} = {v}")
         (config_dir / "config.toml").write_text("\n".join(lines) + "\n")
+
     return _write
 
 

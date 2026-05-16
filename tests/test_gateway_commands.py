@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import socket
 import sys
 import threading
@@ -18,6 +19,22 @@ from ax_cli.commands import gateway as gateway_cmd
 from ax_cli.main import app
 
 runner = CliRunner()
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    cleaned = ANSI_RE.sub("", text)
+    # Rich panels wrap long messages across lines with box-drawing chars;
+    # strip borders and collapse whitespace so substring assertions survive.
+    cleaned = re.sub(r"[│╭╮╰╯─]", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _collapse_rich(text: str) -> str:
+    text = ANSI_RE.sub("", text)
+    text = re.sub(r"[│╭╮╰╯─]", " ", text)
+    return re.sub(r"\s+", " ", text)
 
 
 class _FakeTokenExchanger:
@@ -108,6 +125,93 @@ def test_gateway_local_init_writes_tokenless_config(monkeypatch, tmp_path):
     assert json.loads(result.output)["token_stored"] is False
 
 
+def test_gateway_local_init_rejects_missing_workdir_by_default(monkeypatch, tmp_path):
+    """Default behavior: --workdir must already exist; bail rather than silently mkdir."""
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_request_local_connect",
+        lambda **kwargs: pytest.fail("connect must not run when workdir is rejected"),
+    )
+    missing = tmp_path / "agents" / "mac_backend"
+    assert not missing.exists()
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "init", "mac_backend", "--workdir", str(missing)],
+    )
+
+    # Rich/Typer can split flag names with ANSI color escapes on color-capable
+    # terminals (CI), so normalize before substring asserts.
+    output = _collapse_rich(result.output)
+    assert result.exit_code != 0
+    assert "does not exist" in output
+    assert "--create-workdir" in output
+    assert not missing.exists(), "workdir must not be created without --create-workdir"
+    assert not (missing / ".ax").exists()
+
+
+def test_gateway_local_init_with_create_workdir_provisions_directory(monkeypatch, tmp_path):
+    """`--create-workdir` opts in to making the missing folder."""
+    calls = {}
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_request_local_connect",
+        lambda **kwargs: (
+            calls.setdefault("connect", kwargs)
+            or {"status": "approved", "session_token": "tok", "agent": {"name": kwargs["agent_name"]}}
+        ),
+    )
+
+    new_workdir = tmp_path / "agents" / "fresh"
+    assert not new_workdir.exists()
+
+    result = runner.invoke(
+        app,
+        [
+            "gateway",
+            "local",
+            "init",
+            "fresh",
+            "--workdir",
+            str(new_workdir),
+            "--create-workdir",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert new_workdir.is_dir()
+    assert (new_workdir / ".ax" / "config.toml").exists()
+
+
+def test_gateway_local_init_rejects_workdir_pointing_at_a_file(monkeypatch, tmp_path):
+    """If --workdir resolves to an existing file, fail with a clear error."""
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_request_local_connect",
+        lambda **kwargs: pytest.fail("connect must not run when workdir is invalid"),
+    )
+    file_path = tmp_path / "not-a-dir.txt"
+    file_path.write_text("nope")
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "init", "x", "--workdir", str(file_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output
+
+
+def test_ensure_workdir_helper_no_create_when_exists(tmp_path):
+    """The helper is a no-op when the workdir already exists as a directory."""
+    existing = tmp_path / "already_here"
+    existing.mkdir()
+    # Should not raise; should not modify anything observable.
+    gateway_cmd._ensure_workdir(existing, create=False)
+    assert existing.is_dir()
+
+
 def test_existing_agent_home_space_prefers_backend_default_space():
     class FakeClient:
         def list_agents(self):
@@ -131,6 +235,138 @@ def test_existing_agent_home_space_prefers_backend_current_space():
         )
         == "space-current"
     )
+
+
+def _seed_local_session_for_challenge(tmp_path, monkeypatch):
+    """Set up a minimal approved managed agent + active local session."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "operator",
+        }
+    )
+    token_file = tmp_path / "challenge-agent.token"
+    token_file.write_text("axp_a_test.secret")
+    entry = {
+        "name": "challenge-agent",
+        "agent_id": "agent-challenge",
+        "space_id": "space-1",
+        "base_url": "https://paxai.app",
+        "token_file": str(token_file),
+        "approval_state": "approved",
+        "attestation_state": "verified",
+    }
+    registry = {"agents": [entry]}
+    session_payload = gateway_core.issue_local_session(registry, entry)
+    registry = {"agents": [entry], "local_sessions": registry["local_sessions"]}
+    gateway_core.save_gateway_registry(registry)
+
+    class _SilentSendClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def send_message(self, space_id, content, **_kwargs):
+            return {"message": {"id": "msg-sent-1", "space_id": space_id, "content": content}}
+
+    monkeypatch.setattr(gateway_cmd, "AxClient", _SilentSendClient)
+    monkeypatch.setattr(gateway_cmd, "_load_managed_agent_client", lambda entry: _SilentSendClient())
+    return session_payload["session_token"]
+
+
+def test_session_challenge_disabled_by_default(monkeypatch, tmp_path):
+    """Flag off → send returns normal payload, no challenge surface."""
+    monkeypatch.delenv("AX_GATEWAY_SESSION_CHALLENGE", raising=False)
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    payload = gateway_cmd._send_local_session_message(
+        session_token=token,
+        body={"content": "hello", "space_id": "space-1"},
+    )
+
+    assert payload["agent"] == "challenge-agent"
+    assert "next_session_proof" not in payload
+    # Registry session record stays clean — no challenge state written.
+    record = gateway_cmd._find_local_session_record(
+        gateway_core.load_gateway_registry(), payload["session"]["session_id"]
+    )
+    assert "challenge_code" not in record
+
+
+def test_session_challenge_first_send_issues_code_and_rejects(monkeypatch, tmp_path):
+    """Flag on, no proof → raise with structured `session_challenge_required: <code>`
+    and persist the code on the session record so the next send can verify."""
+    monkeypatch.setenv("AX_GATEWAY_SESSION_CHALLENGE", "1")
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError) as excinfo:
+        gateway_cmd._send_local_session_message(
+            session_token=token,
+            body={"content": "hello", "space_id": "space-1"},
+        )
+    msg = str(excinfo.value)
+    assert msg.startswith("session_challenge_required:")
+    # Code from the message ("session_challenge_required: ABCD. ...").
+    issued_code = msg.split(":", 1)[1].strip().split(".", 1)[0].strip()
+    assert issued_code, "challenge code must appear in the error"
+    # Stored on the session record for the next send to verify against.
+    registry_after = gateway_core.load_gateway_registry()
+    record = registry_after["local_sessions"][0]
+    assert record["challenge_code"] == issued_code
+    assert "challenge_issued_at" in record
+
+
+def test_session_challenge_valid_proof_rotates_and_returns_next_code(monkeypatch, tmp_path):
+    """Flag on, second send with the matching proof → succeeds, response carries
+    a fresh `next_session_proof` so the caller can present it on the next send."""
+    monkeypatch.setenv("AX_GATEWAY_SESSION_CHALLENGE", "1")
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    # First call issues the challenge.
+    with pytest.raises(ValueError) as first:
+        gateway_cmd._send_local_session_message(session_token=token, body={"content": "first", "space_id": "space-1"})
+    issued = str(first.value).split(":", 1)[1].strip().split(".", 1)[0].strip()
+
+    # Second call with the matching proof succeeds and rotates.
+    payload = gateway_cmd._send_local_session_message(
+        session_token=token,
+        body={"content": "second", "space_id": "space-1", "session_proof": issued},
+    )
+    assert payload["agent"] == "challenge-agent"
+    next_code = payload["next_session_proof"]
+    assert next_code, "rotated challenge code missing from response"
+    assert next_code != issued, "code must rotate on every successful send"
+
+    # Stored code matches the rotated one.
+    record = gateway_core.load_gateway_registry()["local_sessions"][0]
+    assert record["challenge_code"] == next_code
+
+
+def test_session_challenge_wrong_proof_rejected(monkeypatch, tmp_path):
+    """Flag on, mismatched proof → structured `invalid_session_proof: expected <code>`."""
+    monkeypatch.setenv("AX_GATEWAY_SESSION_CHALLENGE", "1")
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    # Issue a challenge first.
+    with pytest.raises(ValueError) as first:
+        gateway_cmd._send_local_session_message(session_token=token, body={"content": "first", "space_id": "space-1"})
+    issued = str(first.value).split(":", 1)[1].strip().split(".", 1)[0].strip()
+
+    with pytest.raises(ValueError) as wrong:
+        gateway_cmd._send_local_session_message(
+            session_token=token,
+            body={"content": "second", "space_id": "space-1", "session_proof": "WRONG-CODE"},
+        )
+    msg = str(wrong.value)
+    assert msg.startswith("invalid_session_proof:")
+    assert issued in msg, "error must surface the expected code so the operator can recover"
+    # The stored code must NOT have rotated — a wrong proof doesn't burn the
+    # current challenge.
+    record = gateway_core.load_gateway_registry()["local_sessions"][0]
+    assert record["challenge_code"] == issued
 
 
 def test_local_session_send_hydrates_space_from_database(monkeypatch, tmp_path):
@@ -196,6 +432,7 @@ def test_local_session_send_hydrates_space_from_database(monkeypatch, tmp_path):
             parent_id=None,
             metadata=None,
             message_type="text",
+            attachments=None,
         ):
             sent.update(
                 {
@@ -206,6 +443,7 @@ def test_local_session_send_hydrates_space_from_database(monkeypatch, tmp_path):
                     "parent_id": parent_id,
                     "metadata": metadata,
                     "message_type": message_type,
+                    "attachments": attachments,
                 }
             )
             return {"message": {"id": "msg-1", "space_id": space_id}}
@@ -273,6 +511,7 @@ class _SharedRuntimeClient:
         self.sent = []
         self.processing = []
         self.tool_calls = []
+        self.heartbeats = []
         self.connect_calls = 0
 
     def connect_sse(self, *, space_id, timeout=None):
@@ -308,6 +547,10 @@ class _SharedRuntimeClient:
     def record_tool_call(self, **payload):
         self.tool_calls.append(payload)
         return {"ok": True, "tool_call_id": payload["tool_call_id"]}
+
+    def send_heartbeat(self, *, agent_id=None, status=None, note=None, cadence_seconds=None):
+        self.heartbeats.append({"agent_id": agent_id, "status": status})
+        return {"ok": True}
 
     def close(self):
         return None
@@ -984,6 +1227,7 @@ def test_gateway_local_connect_requests_approval_then_issues_session(monkeypatch
             parent_id=None,
             metadata=None,
             message_type="text",
+            attachments=None,
         ):
             self.sent.append(
                 {
@@ -994,6 +1238,7 @@ def test_gateway_local_connect_requests_approval_then_issues_session(monkeypatch
                     "parent_id": parent_id,
                     "metadata": metadata,
                     "message_type": message_type,
+                    "attachments": attachments,
                 }
             )
             return {
@@ -1073,6 +1318,7 @@ def test_gateway_local_connect_requests_approval_then_issues_session(monkeypatch
                 "mentions": ["night_owl"],
             },
             "message_type": "text",
+            "attachments": None,
         }
     ]
 
@@ -1329,6 +1575,110 @@ def test_gateway_local_connect_rejects_second_identity_from_same_origin(monkeypa
 
     with pytest.raises(ValueError, match="already registered as @mac_frontend"):
         gateway_cmd._connect_local_pass_through_agent(agent_name="frontend_sentinel", fingerprint=changed_name)
+
+
+def test_gateway_local_connect_allows_existing_agent_to_reconnect_when_workdir_is_shared(monkeypatch, tmp_path):
+    """Multi-tenant case: cli_god and pulse-cc legitimately share a workdir.
+
+    If pulse-cc was registered first and cli_god's row also exists, cli_god
+    re-connecting from the same physical workdir must NOT be rejected as a
+    fingerprint collision — the operator has already approved both identities.
+
+    Regression guard for aX task b4ecca83.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "jacob",
+        }
+    )
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: _FakeUserClient())
+    monkeypatch.setattr(gateway_cmd, "_hydrate_entry_space_from_database", lambda *a, **k: None)
+
+    shared_fingerprint = {
+        "pid": 999999,
+        "parent_pid": 1,
+        "cwd": str(tmp_path),
+        "exe_path": sys.executable,
+        "user": "jacob",
+    }
+    pulse_fingerprint = {**shared_fingerprint, "agent_name": "pulse-cc"}
+    cli_god_fingerprint = {**shared_fingerprint, "agent_name": "cli_god"}
+
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "pulse-cc",
+            "agent_id": "agent-pulse",
+            "space_id": "space-1",
+            "template_id": "pass_through",
+            "runtime_type": "inbox",
+            "approval_state": "approved",
+            "attestation_state": "verified",
+            "local_fingerprint": pulse_fingerprint,
+        },
+        {
+            "name": "cli_god",
+            "agent_id": "agent-cli-god",
+            "space_id": "space-1",
+            "template_id": "pass_through",
+            "runtime_type": "inbox",
+            "approval_state": "approved",
+            "attestation_state": "verified",
+            "local_fingerprint": cli_god_fingerprint,
+        },
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    # cli_god re-connects from the same workdir pulse-cc also uses.
+    # Before the fix this raised ValueError("Gateway identity mismatch: ...
+    # already registered as @pulse-cc"); now it should succeed because
+    # cli_god's own registry row is found by name first, before the
+    # collision check runs.
+    result = gateway_cmd._connect_local_pass_through_agent(agent_name="cli_god", fingerprint=cli_god_fingerprint)
+    assert result["agent"]["name"] == "cli_god"
+    assert result["agent"]["agent_id"] == "agent-cli-god"
+
+
+def test_gateway_local_connect_still_blocks_fresh_name_when_workdir_is_owned(monkeypatch, tmp_path):
+    """The fresh-name protection must still fire when registering a brand-new
+    agent at a workdir already owned by a different agent.
+
+    This is the same shape as the existing
+    ``rejects_second_identity_from_same_origin`` test but explicitly framed as
+    the "after the fix, the protection still exists" guard so a future
+    refactor can't quietly silence it.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    fingerprint = {
+        "agent_name": "owner",
+        "pid": 999999,
+        "parent_pid": 1,
+        "cwd": str(tmp_path),
+        "exe_path": sys.executable,
+        "user": "anyone",
+    }
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "owner",
+            "agent_id": "agent-owner",
+            "space_id": "space-1",
+            "template_id": "pass_through",
+            "runtime_type": "inbox",
+            "local_fingerprint": dict(fingerprint),
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    fresh_attempt = {**fingerprint, "agent_name": "newbie"}
+    with pytest.raises(ValueError, match="already registered as @owner"):
+        gateway_cmd._connect_local_pass_through_agent(agent_name="newbie", fingerprint=fresh_attempt)
 
 
 def test_find_agent_entry_by_ref_matches_row_and_stable_prefix():
@@ -1743,7 +2093,7 @@ def test_gateway_ui_agent_reject_marks_pending_approval_rejected(monkeypatch, tm
     class FakeHandler(handler_cls):
         def __init__(self):
             self.path = "/api/agents/reject-ui-bot/reject"
-            self.headers = {"Content-Length": "2"}
+            self.headers = {"Content-Length": "2", "Host": "127.0.0.1"}
             self.rfile = __import__("io").BytesIO(b"{}")
             self.status = None
             self.body = b""
@@ -2005,6 +2355,90 @@ def test_managed_echo_runtime_processes_message(tmp_path, monkeypatch):
     assert "message_received" in event_names
     assert "message_claimed" in event_names
     assert "reply_sent" in event_names
+
+
+def test_runtime_sends_connected_heartbeat_on_first_sse_event(tmp_path, monkeypatch):
+    """Listener loop sends 'connected' heartbeat on first SSE event after connecting."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    payload = {"id": "msg-hb", "content": "ping", "author": {"id": "u1", "name": "u", "type": "user"}, "mentions": ["hb-bot"]}
+    shared = _SharedRuntimeClient(payload)
+    runtime = gateway_core.ManagedAgentRuntime(
+        {"name": "hb-bot", "agent_id": "agent-hb", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
+        client_factory=lambda **kwargs: shared,
+    )
+    runtime.start()
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not shared.heartbeats:
+        time.sleep(0.05)
+    runtime.stop()
+    assert any(h["status"] == "connected" for h in shared.heartbeats)
+
+
+def test_runtime_sends_stale_heartbeat_on_sse_disconnect(tmp_path, monkeypatch):
+    """Listener loop sends 'stale' heartbeat when SSE connection drops."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+
+    class _FailOnSecondConnect(_SharedRuntimeClient):
+        def connect_sse(self, *, space_id, timeout=None):
+            self.connect_calls += 1
+            if self.connect_calls == 1:
+                raise ConnectionError("SSE dropped")
+            raise ConnectionError("test done")
+
+    shared = _FailOnSecondConnect({})
+    runtime = gateway_core.ManagedAgentRuntime(
+        {"name": "stale-bot", "agent_id": "agent-stale", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
+        client_factory=lambda **kwargs: shared,
+    )
+    runtime.start()
+    deadline = time.time() + 3.0
+    while time.time() < deadline and not any(h["status"] == "stale" for h in shared.heartbeats):
+        time.sleep(0.05)
+    runtime.stop()
+    assert any(h["status"] == "stale" for h in shared.heartbeats)
+
+
+def test_runtime_sends_offline_heartbeat_on_stop(tmp_path, monkeypatch):
+    """stop() sends 'offline' heartbeat using the agent-bound client."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    shared = _SharedRuntimeClient({})
+    runtime = gateway_core.ManagedAgentRuntime(
+        {"name": "offline-bot", "agent_id": "agent-off", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
+        client_factory=lambda **kwargs: shared,
+    )
+    runtime.stop()
+    assert any(h["status"] == "offline" for h in shared.heartbeats)
+
+
+def test_runtime_sends_setup_error_heartbeat_on_error_state(tmp_path, monkeypatch):
+    """_update_state fires 'setup_error' heartbeat on first transition to error."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    shared = _SharedRuntimeClient({})
+    runtime = gateway_core.ManagedAgentRuntime(
+        {"name": "err-bot", "agent_id": "agent-err", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
+        client_factory=lambda **kwargs: shared,
+    )
+    runtime._update_state(effective_state="error", last_error="test error")
+    assert any(h["status"] == "setup_error" for h in shared.heartbeats)
+    # Second transition to error should not fire again
+    runtime._update_state(effective_state="error", last_error="still broken")
+    assert sum(1 for h in shared.heartbeats if h["status"] == "setup_error") == 1
 
 
 def test_managed_exec_runtime_parses_gateway_progress_events(tmp_path, monkeypatch):
@@ -3138,12 +3572,16 @@ def test_gateway_runtime_types_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["runtime_types"]]
-    assert ids == ["echo", "exec", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox"]
+    assert ids == ["echo", "exec", "hermes_plugin", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox"]
     exec_type = next(item for item in payload["runtime_types"] if item["id"] == "exec")
     assert exec_type["signals"]["activity"]
     assert exec_type["examples"]
+    plugin_type = next(item for item in payload["runtime_types"] if item["id"] == "hermes_plugin")
+    assert plugin_type["kind"] == "supervised_process"
+    assert plugin_type.get("deprecated") is not True
     hermes_type = next(item for item in payload["runtime_types"] if item["id"] == "hermes_sentinel")
     assert hermes_type["kind"] == "supervised_process"
+    assert hermes_type.get("deprecated") is True
     sentinel_type = next(item for item in payload["runtime_types"] if item["id"] == "sentinel_cli")
     assert sentinel_type["signals"]["tools"]
     channel_type = next(item for item in payload["runtime_types"] if item["id"] == "claude_code_channel")
@@ -3214,7 +3652,7 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             runtime_types = client.get("/api/runtime-types")
             assert runtime_types.status_code == 200
             runtime_payload = runtime_types.json()
-            assert runtime_payload["count"] == 6
+            assert runtime_payload["count"] == 7  # +hermes_plugin
             assert runtime_payload["runtime_types"][1]["id"] == "exec"
 
             templates = client.get("/api/templates")
@@ -3479,6 +3917,151 @@ def test_gateway_move_updates_routing_for_test_messages(monkeypatch, tmp_path):
     assert tested["message"]["space_id"] == "space-2"
     assert sent_messages[-1]["space_id"] == "space-2"
     assert sent_messages[-1]["content"].startswith("@mover ")
+
+
+def _seed_revertable_mover(tmp_path, monkeypatch):
+    """Set up an agent in space-1 plus a fake user client that allows moves."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "operator",
+        }
+    )
+    token_file = tmp_path / "mover.token"
+    token_file.write_text("axp_a_mover.secret")
+    allowed_spaces = [
+        {"space_id": "space-1", "name": "Old Space", "is_default": True},
+        {"space_id": "space-2", "name": "New Space", "is_default": False},
+    ]
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "mover",
+            "agent_id": "agent-mover",
+            "space_id": "space-1",
+            "active_space_name": "Old Space",
+            "base_url": "https://paxai.app",
+            "runtime_type": "echo",
+            "template_id": "echo_test",
+            "desired_state": "running",
+            "effective_state": "running",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "allowed_spaces": allowed_spaces,
+            "token_file": str(token_file),
+        }
+    ]
+    gateway_core.ensure_gateway_identity_binding(
+        registry, registry["agents"][0], session=gateway_core.load_gateway_session()
+    )
+    gateway_core.save_gateway_registry(registry)
+
+    class _FakeMover:
+        def __init__(self):
+            self.space_id = "space-1"
+            self.calls = []
+
+        def set_agent_placement(self, identifier, *, space_id, pinned=False):
+            self.calls.append({"identifier": identifier, "space_id": space_id})
+            self.space_id = space_id
+            return {"agent_id": identifier, "space_id": space_id}
+
+        def get_agent_placement(self, identifier):
+            return {"agent_id": identifier, "name": "mover", "space_id": self.space_id}
+
+        def get_agent(self, identifier):
+            return {"agent": {"id": identifier, "name": "mover", "space_id": self.space_id}}
+
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": "space-1", "name": "Old Space", "slug": "old-space"},
+                    {"id": "space-2", "name": "New Space", "slug": "new-space"},
+                ]
+            }
+
+    fake = _FakeMover()
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: fake)
+    return fake
+
+
+def test_gateway_move_records_previous_space_for_revert(monkeypatch, tmp_path):
+    """A successful move persists previous_space_id so --revert can find its way back."""
+    fake = _seed_revertable_mover(tmp_path, monkeypatch)
+
+    moved = gateway_cmd._move_managed_agent_space("mover", "new-space")
+
+    assert moved["space_id"] == "space-2"
+    assert moved["previous_space_id"] == "space-1"
+    assert moved["previous_space_name"] == "Old Space"
+    stored = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "mover")
+    assert stored["previous_space_id"] == "space-1"
+    assert stored["previous_space_name"] == "Old Space"
+    # current_status was set to "moving" mid-move and cleared once the rebind
+    # window resolved (no daemon running in the test, so the wait short-circuits).
+    assert stored.get("current_status") in (None, "")
+    assert stored.get("current_activity") in (None, "")
+    assert fake.calls[-1]["space_id"] == "space-2"
+
+
+def test_gateway_move_revert_returns_to_previous_space(monkeypatch, tmp_path):
+    """--revert uses the persisted previous_space_id without requiring --space."""
+    _seed_revertable_mover(tmp_path, monkeypatch)
+
+    gateway_cmd._move_managed_agent_space("mover", "new-space")
+    reverted = gateway_cmd._move_managed_agent_space("mover", None, revert=True)
+
+    assert reverted["space_id"] == "space-1"
+    assert reverted["active_space_name"] == "Old Space"
+    # After reverting, the previous-space pointer now points at the space we
+    # just left ("space-2") so a second --revert would go back there again.
+    assert reverted["previous_space_id"] == "space-2"
+    stored = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "mover")
+    assert stored["space_id"] == "space-1"
+    assert stored["previous_space_id"] == "space-2"
+
+
+def test_gateway_move_revert_without_history_errors_clearly(monkeypatch, tmp_path):
+    """Reverting an agent that's never been moved fails with an actionable message."""
+    _seed_revertable_mover(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="no recorded previous space"):
+        gateway_cmd._move_managed_agent_space("mover", None, revert=True)
+
+
+def test_gateway_move_revert_and_explicit_space_are_mutually_exclusive(monkeypatch, tmp_path):
+    """Passing both --space and --revert is rejected before any backend call."""
+    _seed_revertable_mover(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="not both"):
+        gateway_cmd._move_managed_agent_space("mover", "new-space", revert=True)
+
+
+def test_gateway_move_cli_requires_one_of_space_or_revert(monkeypatch, tmp_path):
+    """The CLI command rejects an invocation with neither --space nor --revert."""
+    _seed_revertable_mover(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["gateway", "agents", "move", "mover"])
+
+    assert result.exit_code == 1
+    assert "Provide --space or --revert" in result.output
+
+
+def test_gateway_move_no_op_does_not_overwrite_previous_space(monkeypatch, tmp_path):
+    """A move-to-same-space short-circuits and must not blank the revert pointer."""
+    _seed_revertable_mover(tmp_path, monkeypatch)
+
+    # First move records space-1 as previous.
+    gateway_cmd._move_managed_agent_space("mover", "new-space")
+    # Now move to the SAME space (no-op).
+    gateway_cmd._move_managed_agent_space("mover", "new-space")
+
+    stored = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "mover")
+    assert stored["previous_space_id"] == "space-1"
 
 
 def test_gateway_move_waits_for_listener_ready_after_runtime_start(monkeypatch, tmp_path):
@@ -3833,7 +4416,10 @@ def test_gateway_agents_send_uses_managed_identity(monkeypatch, tmp_path):
     assert payload["content"] == "@codex hello there"
     assert payload["message"]["metadata"]["gateway"]["sent_via"] == "gateway_cli"
     recent = gateway_core.load_recent_gateway_activity()
-    assert recent[-1]["event"] == "manual_message_sent"
+    # The send event must appear, but is no longer guaranteed to be last —
+    # the default-on post-send inbox poll (aX task 663d9e6f) appends a
+    # `managed_inbox_polled` event after it.
+    assert any(item["event"] == "manual_message_sent" for item in recent)
 
 
 def test_gateway_agents_send_rejects_user_bootstrap_pat(monkeypatch, tmp_path):
@@ -3950,7 +4536,10 @@ def test_gateway_agents_send_acknowledges_pending_inbox_message(monkeypatch, tmp
     assert updated["processed_count"] == 1
     assert updated["last_reply_message_id"] == "msg-sent-1"
     recent = gateway_core.load_recent_gateway_activity()
-    assert recent[-1]["event"] == "manual_queue_acknowledged"
+    # Same nuance as the sister test: the queue-ack event is in the recent
+    # log but no longer trailing because the default-on post-send inbox
+    # poll appends afterwards.
+    assert any(item["event"] == "manual_queue_acknowledged" for item in recent)
 
 
 def test_gateway_agents_send_blocks_identity_mismatch(monkeypatch, tmp_path):
@@ -4353,6 +4942,48 @@ def test_gateway_agents_attach_writes_channel_config_and_command(monkeypatch, tm
     assert updated["desired_state"] == "running"
 
 
+def test_gateway_agents_mark_attached_makes_manual_session_active(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "roger.token"
+    token_file.write_text("axp_a_agent.secret\n")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "roger",
+            "agent_id": "agent-roger",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "claude_code_channel",
+            "template_id": "claude_code_channel",
+            "workdir": str(tmp_path / "roger"),
+            "desired_state": "stopped",
+            "effective_state": "stopped",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "token_file": str(token_file),
+            "attestation_state": "verified",
+            "approval_state": "approved",
+            "identity_status": "verified",
+            "environment_status": "environment_allowed",
+            "space_status": "active_allowed",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    result = runner.invoke(app, ["gateway", "agents", "mark-attached", "roger", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["desired_state"] == "running"
+    assert payload["effective_state"] == "running"
+    assert payload["manual_attach_state"] == "attached"
+    assert payload["local_attach_state"] == "manual_attached"
+    assert payload["connected"] is True
+    assert payload["presence"] == "IDLE"
+    assert payload["reachability"] == "live_now"
+
+
 def test_gateway_ui_attach_launches_attached_session(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
@@ -4436,6 +5067,278 @@ def test_gateway_ui_attach_launches_attached_session(monkeypatch, tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+
+
+def test_gateway_ui_manual_attach_marks_attached_session_active(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "roger.token"
+    token_file.write_text("axp_a_agent.secret\n")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "roger",
+            "agent_id": "agent-roger",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "claude_code_channel",
+            "template_id": "claude_code_channel",
+            "workdir": str(tmp_path / "roger"),
+            "desired_state": "running",
+            "effective_state": "stopped",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "token_file": str(token_file),
+            "attestation_state": "verified",
+            "approval_state": "approved",
+            "identity_status": "verified",
+            "environment_status": "environment_allowed",
+            "space_status": "active_allowed",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    handler = gateway_cmd._build_gateway_ui_handler(activity_limit=5, refresh_ms=1500)
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+    server = gateway_cmd._GatewayUiServer((host, port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with httpx.Client(base_url=f"http://{host}:{port}", timeout=2.0) as client:
+            marked = client.post("/api/agents/roger/manual-attach", json={"note": "already attached"})
+            assert marked.status_code == 200
+            payload = marked.json()
+            assert payload["manual_attach_state"] == "attached"
+            assert payload["connected"] is True
+            assert payload["reachability"] == "live_now"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_gateway_ui_external_runtime_announce_marks_plugin_active(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "nova",
+            "agent_id": "agent-nova",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "template_id": "hermes",
+            "runtime_type": "hermes_sentinel",
+            "desired_state": "running",
+            "effective_state": "stopped",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "attestation_state": "verified",
+            "approval_state": "approved",
+            "identity_status": "verified",
+            "environment_status": "environment_allowed",
+            "space_status": "active_allowed",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    handler = gateway_cmd._build_gateway_ui_handler(activity_limit=5, refresh_ms=1500)
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+    server = gateway_cmd._GatewayUiServer((host, port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with httpx.Client(base_url=f"http://{host}:{port}", timeout=2.0) as client:
+            announced = client.post(
+                "/api/agents/nova/external-runtime-announce",
+                json={
+                    "runtime_kind": "hermes_plugin",
+                    "status": "connected",
+                    "pid": 12345,
+                    "activity": "Hermes plugin listener connected",
+                },
+            )
+            assert announced.status_code == 200
+            payload = announced.json()
+            assert payload["connected"] is True
+            assert payload["presence"] == "IDLE"
+            assert payload["reachability"] == "live_now"
+            assert payload["local_attach_state"] == "external_connected"
+            assert payload["current_activity"] == "Hermes plugin listener connected"
+
+            stored = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "nova")
+            assert stored["desired_state"] == "running"
+            assert stored["effective_state"] == "running"
+            assert stored["external_runtime_managed"] is True
+            assert stored["external_runtime_state"] == "connected"
+            assert stored["external_runtime_kind"] == "hermes_plugin"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_gateway_ui_external_runtime_announce_respects_operator_stop(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "nova",
+            "agent_id": "agent-nova",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "template_id": "hermes",
+            "runtime_type": "hermes_sentinel",
+            "desired_state": "stopped",
+            "effective_state": "stopped",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "attestation_state": "verified",
+            "approval_state": "approved",
+            "identity_status": "verified",
+            "environment_status": "environment_allowed",
+            "space_status": "active_allowed",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    handler = gateway_cmd._build_gateway_ui_handler(activity_limit=5, refresh_ms=1500)
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+    server = gateway_cmd._GatewayUiServer((host, port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with httpx.Client(base_url=f"http://{host}:{port}", timeout=2.0) as client:
+            announced = client.post(
+                "/api/agents/nova/external-runtime-announce",
+                json={
+                    "runtime_kind": "hermes_plugin",
+                    "status": "connected",
+                    "pid": 12345,
+                    "activity": "Hermes plugin listener connected",
+                },
+            )
+            assert announced.status_code == 200
+            payload = announced.json()
+            assert payload["connected"] is False
+            assert payload["effective_state"] == "stopped"
+            assert payload["desired_state"] == "stopped"
+            assert payload["local_attach_state"] == "external_stopped"
+
+            stored = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "nova")
+            assert stored["desired_state"] == "stopped"
+            assert stored["effective_state"] == "stopped"
+            assert stored["runtime_instance_id"] is None
+            assert stored["external_runtime_managed"] is True
+            assert stored["external_runtime_state"] == "connected"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_gateway_daemon_does_not_launch_managed_process_for_external_runtime(tmp_path):
+    entry = {
+        "name": "nova",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "running",
+        "effective_state": "running",
+        "external_runtime_state": "connected",
+        "external_runtime_kind": "hermes_plugin",
+        "external_runtime_instance_id": "external:hermes_plugin:nova:12345",
+        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    daemon = gateway_core.GatewayDaemon(client_factory=lambda **kwargs: None)
+    daemon._reconcile_runtime(entry)
+
+    assert daemon._runtimes == {}
+    assert entry["effective_state"] == "running"
+    assert entry["runtime_instance_id"] == "external:hermes_plugin:nova:12345"
+
+
+def test_gateway_daemon_external_runtime_respects_operator_stop(tmp_path):
+    entry = {
+        "name": "nova",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "stopped",
+        "effective_state": "running",
+        "external_runtime_state": "connected",
+        "external_runtime_kind": "hermes_plugin",
+        "external_runtime_instance_id": "external:hermes_plugin:nova:12345",
+        "runtime_instance_id": "external:hermes_plugin:nova:12345",
+        "current_status": "processing",
+        "current_tool": "search_docs",
+        "current_tool_call_id": "tool-1",
+        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    daemon = gateway_core.GatewayDaemon(client_factory=lambda **kwargs: None)
+    daemon._reconcile_runtime(entry)
+
+    assert daemon._runtimes == {}
+    assert entry["effective_state"] == "stopped"
+    assert entry["runtime_instance_id"] is None
+    assert entry["current_status"] is None
+    assert entry["current_tool"] is None
+    assert entry["current_tool_call_id"] is None
+    assert entry["local_attach_state"] == "external_stopped"
+
+
+def test_gateway_daemon_preserves_stale_external_plugin_without_legacy_fallback(tmp_path):
+    entry = {
+        "name": "nova",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "running",
+        "effective_state": "running",
+        "external_runtime_managed": True,
+        "external_runtime_kind": "hermes_plugin",
+        "external_runtime_instance_id": "external:hermes_plugin:nova:12345",
+        "last_seen_at": (
+            datetime.now(timezone.utc) - timedelta(seconds=gateway_core.RUNTIME_STALE_AFTER_SECONDS + 10)
+        ).isoformat(),
+    }
+
+    daemon = gateway_core.GatewayDaemon(client_factory=lambda **kwargs: None)
+    daemon._reconcile_runtime(entry)
+
+    assert daemon._runtimes == {}
+    assert entry["effective_state"] == "stale"
+    assert entry["runtime_instance_id"] == "external:hermes_plugin:nova:12345"
+    assert entry["local_attach_state"] == "external_stale"
+    assert "fresh external runtime heartbeat" in entry["local_attach_detail"]
+
+
+def test_gateway_daemon_marks_stopped_when_desired_state_is_stopped():
+    entry = {
+        "name": "nova",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "stopped",
+        "effective_state": "running",
+        "runtime_instance_id": "old-runtime",
+        "current_status": "processing",
+        "current_activity": "Hermes sentinel listener running",
+        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    daemon = gateway_core.GatewayDaemon(client_factory=lambda **kwargs: None)
+    daemon._reconcile_runtime(entry)
+
+    assert entry["effective_state"] == "stopped"
+    assert entry["runtime_instance_id"] is None
+    assert entry["current_status"] is None
+    assert entry["current_activity"] is None
 
 
 def test_launch_attached_agent_session_uses_script_log_without_stdout_duplication(monkeypatch, tmp_path):
@@ -4904,11 +5807,13 @@ def test_gateway_status_payload_surfaces_alerts(monkeypatch, tmp_path):
 
 def test_gateway_spaces_use_resolves_slug_and_updates_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    private_uuid = "11111111-2222-3333-4444-555555555555"
+    team_uuid = "66666666-7777-8888-9999-aaaaaaaaaaaa"
     gateway_core.save_gateway_session(
         {
             "token": "axp_u_test.token",
             "base_url": "https://paxai.app",
-            "space_id": "private-space",
+            "space_id": private_uuid,
             "space_name": "madtank-workspace",
             "username": "codex",
         }
@@ -4918,8 +5823,8 @@ def test_gateway_spaces_use_resolves_slug_and_updates_session(monkeypatch, tmp_p
         def list_spaces(self):
             return {
                 "spaces": [
-                    {"id": "private-space", "slug": "madtank-workspace", "name": "madtank's Workspace"},
-                    {"id": "team-space", "slug": "ax-cli-dev", "name": "aX CLI Dev"},
+                    {"id": private_uuid, "slug": "madtank-workspace", "name": "madtank's Workspace"},
+                    {"id": team_uuid, "slug": "ax-cli-dev", "name": "aX CLI Dev"},
                 ]
             }
 
@@ -4929,14 +5834,21 @@ def test_gateway_spaces_use_resolves_slug_and_updates_session(monkeypatch, tmp_p
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["space_id"] == "team-space"
+    assert payload["space_id"] == team_uuid
     assert payload["space_name"] == "aX CLI Dev"
     session = gateway_core.load_gateway_session()
-    assert session["space_id"] == "team-space"
+    assert session["space_id"] == team_uuid
     assert session["space_name"] == "aX CLI Dev"
+    # Active space lives only in session.json — registry.gateway must NOT
+    # carry a duplicate copy (post-simplification: single source of truth).
     registry = gateway_core.load_gateway_registry()
-    assert registry["gateway"]["space_id"] == "team-space"
-    assert registry["gateway"]["space_name"] == "aX CLI Dev"
+    assert "space_id" not in registry["gateway"]
+    assert "space_name" not in registry["gateway"]
+    # Resolved id/name should be persisted to the spaces cache so a subsequent
+    # slug switch can short-circuit list_spaces.
+    cached = gateway_core.load_space_cache()
+    cached_ids = {row.get("id") for row in cached}
+    assert team_uuid in cached_ids
 
 
 def test_gateway_spaces_current_shows_session_space(monkeypatch, tmp_path):
@@ -5209,8 +6121,9 @@ def test_sweep_does_not_auto_hide_stale_agent(monkeypatch, tmp_path):
     assert "hidden_reason" not in entry
     recent = gateway_core.load_recent_gateway_activity()
     assert not any(r.get("event") == "managed_agent_hidden" for r in recent)
-    # Upstream liveness signal still goes out — that's the sweep's only job.
-    assert client.heartbeats and client.heartbeats[0]["status"] == "stale"
+    # Sweep no longer sends heartbeats — agent runtimes send them from their
+    # own bound clients. Sweep's user token is rejected by the heartbeat endpoint.
+    assert client.heartbeats == []
 
 
 def test_sweep_skips_switchboard(monkeypatch, tmp_path):
@@ -5556,7 +6469,8 @@ def test_reconcile_skips_hidden_agents_no_runtime_no_upstream(monkeypatch, tmp_p
     # Hidden + archived must NOT have attestation_state populated by reconcile.
     # (evaluate_runtime_attestation runs only on the active path.)
     assert "attestation_state" not in stored_hidden or stored_hidden["attestation_state"] in (None, "")
-    assert "attestation_state" not in next(a for a in registry["agents"] if a["name"] == "stale-archived") or True
+    stored_archived = next(a for a in registry["agents"] if a["name"] == "stale-archived")
+    assert "attestation_state" not in stored_archived or stored_archived["attestation_state"] in (None, "")
 
 
 def test_reconcile_stops_runtime_when_agent_transitions_to_hidden(monkeypatch, tmp_path):
@@ -5845,50 +6759,6 @@ def test_operator_cleanup_restore_unhides_selected_agents(monkeypatch, tmp_path)
     assert [event["event"] for event in recent].count("managed_agent_unhidden") == 1
 
 
-def test_lifecycle_signal_sent_on_connected_to_stale(monkeypatch, tmp_path):
-    _isolate_gateway_paths(monkeypatch, tmp_path)
-    client = _RecordingHeartbeatClient()
-    daemon = _build_daemon(client)
-    entry = _stale_hermes_entry("hermes-flap", age_seconds=20 * 60)
-    registry = {"agents": [entry]}
-    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
-    assert len(client.heartbeats) == 1
-    assert client.heartbeats[0]["status"] == "stale"
-    assert client.heartbeats[0]["agent_id"] == entry["agent_id"]
-    assert entry["last_lifecycle_signal"]["phase"] == "stale"
-
-
-def test_lifecycle_signal_idempotent(monkeypatch, tmp_path):
-    _isolate_gateway_paths(monkeypatch, tmp_path)
-    client = _RecordingHeartbeatClient()
-    daemon = _build_daemon(client)
-    entry = _stale_hermes_entry("hermes-flap", age_seconds=20 * 60)
-    registry = {"agents": [entry]}
-    session = {"token": "axp_u_test", "base_url": "http://x"}
-    daemon._sweep_lifecycle(registry, session=session)
-    daemon._sweep_lifecycle(registry, session=session)
-    assert len(client.heartbeats) == 1
-
-
-def test_lifecycle_signal_404_tolerant(monkeypatch, tmp_path):
-    _isolate_gateway_paths(monkeypatch, tmp_path)
-    boom = httpx.HTTPStatusError(
-        "platform has no record",
-        request=httpx.Request("POST", "http://x/api/v1/agents/heartbeat"),
-        response=httpx.Response(404),
-    )
-    client = _RecordingHeartbeatClient(fail_with=boom, fail_status_code=404)
-    daemon = _build_daemon(client)
-    entry = _stale_hermes_entry("hermes-ghost", age_seconds=20 * 60)
-    registry = {"agents": [entry]}
-    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
-    # Sweep doesn't mutate lifecycle_phase regardless of upstream response.
-    assert entry.get("lifecycle_phase", "active") == "active"
-    # 404 counts as "platform doesn't know about this agent" — sticky signal
-    # still updated so we don't retry forever.
-    assert entry["last_lifecycle_signal"]["phase"] == "stale"
-
-
 def test_remove_managed_agent_calls_delete_agent_then_local_remove(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
     token_path = tmp_path / "tok"
@@ -6006,8 +6876,6 @@ def test_archive_managed_agent_sets_phase_and_stops_runtime(monkeypatch, tmp_pat
     assert stored["desired_state"] == "stopped"
     assert stored["desired_state_before_archive"] == "running"
     assert "archived_at" in stored
-    # Upstream signal sent best-effort.
-    assert any(h["status"] == "archived" for h in client.heartbeats)
     # Audit event recorded.
     recent = gateway_core.load_recent_gateway_activity()
     assert any(r.get("event") == "managed_agent_archived" for r in recent)
@@ -6059,8 +6927,6 @@ def test_archive_then_restore_returns_to_prior_desired_state(monkeypatch, tmp_pa
     assert "desired_state_before_archive" not in stored
     recent = gateway_core.load_recent_gateway_activity()
     assert any(r.get("event") == "managed_agent_restored" for r in recent)
-    # Restore signals 'connected' upstream.
-    assert any(h["status"] == "connected" for h in client.heartbeats)
 
 
 def test_restore_unarchived_agent_is_noop(monkeypatch, tmp_path):
@@ -6432,7 +7298,13 @@ def _make_429_error() -> httpx.HTTPStatusError:
 
 
 def test_with_upstream_429_retry_succeeds_on_second_attempt(monkeypatch):
-    """Helper retries on 429 and returns the success result of the next call."""
+    """Helper retries on 429 and returns the success result of the next call.
+
+    Wait honors ``Retry-After: 12`` from the server response rather than the
+    1s exponential-backoff default — paxai.app's per-user bucket needs the
+    full server-advertised cooldown before the retry has any chance of
+    succeeding.
+    """
     sleeps: list[float] = []
     monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
     calls = {"n": 0}
@@ -6446,7 +7318,7 @@ def test_with_upstream_429_retry_succeeds_on_second_attempt(monkeypatch):
     result = gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
     assert result == {"agent": "ok"}
     assert calls["n"] == 2
-    assert sleeps == [1.0]  # one backoff before the successful retry
+    assert sleeps == [12.0]  # max(exp=1.0, retry_after=12)
 
 
 def test_with_upstream_429_retry_exhausts_then_raises(monkeypatch):
@@ -6463,8 +7335,52 @@ def test_with_upstream_429_retry_exhausts_then_raises(monkeypatch):
         gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
     assert exc_info.value.retries_attempted == 2
     assert exc_info.value.retry_after_seconds == 12  # parsed from header
-    # 2 retries × exponential = 1s + 2s.
-    assert sleeps == [1.0, 2.0]
+    # Both retries honor Retry-After: 12 (max of exp backoff 1s/2s and 12s hint).
+    assert sleeps == [12.0, 12.0]
+
+
+def test_with_upstream_429_retry_falls_back_to_exp_backoff_without_retry_after(monkeypatch):
+    """If the server omits Retry-After, fall back to the exponential
+    backoff schedule. Preserves prior behavior for non-conforming responses.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
+
+    request = httpx.Request("POST", "https://paxai.app/api/v1/agents")
+    no_hint = httpx.HTTPStatusError(
+        "429",
+        request=request,
+        response=httpx.Response(429, request=request),  # no Retry-After header
+    )
+
+    def call():
+        raise no_hint
+
+    with pytest.raises(gateway_cmd.UpstreamRateLimitedError):
+        gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
+    assert sleeps == [1.0, 2.0]  # exp backoff: 1*2^0, 1*2^1
+
+
+def test_with_upstream_429_retry_caps_wait_at_max(monkeypatch):
+    """Pathological Retry-After values are capped at ``max_wait`` so a
+    misbehaving server can't hang the CLI for hours.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
+
+    request = httpx.Request("POST", "https://paxai.app/api/v1/agents")
+    insane = httpx.HTTPStatusError(
+        "429",
+        request=request,
+        response=httpx.Response(429, headers={"retry-after": "999999"}, request=request),
+    )
+
+    def call():
+        raise insane
+
+    with pytest.raises(gateway_cmd.UpstreamRateLimitedError):
+        gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0, max_wait=30.0)
+    assert sleeps == [30.0, 30.0]  # both capped at max_wait
 
 
 def test_with_upstream_429_retry_propagates_other_errors(monkeypatch):
@@ -7070,3 +7986,898 @@ def test_same_error_signature_increments_consecutive_count(monkeypatch, tmp_path
 
     runtime._record_setup_error(error_msg)
     assert runtime.entry["consecutive_setup_errors"] == 4
+
+
+# -- Active-space simplification (single source of truth) ---------------------
+
+
+def test_load_gateway_registry_strips_legacy_gateway_space_keys(monkeypatch, tmp_path):
+    """Legacy registries with space_id/space_name in the gateway block must be
+    auto-migrated on load: session.json owns active space, registry.gateway
+    never carries a duplicate."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    legacy = {
+        "version": 1,
+        "gateway": {
+            "gateway_id": "gw-test",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+            "session_connected": True,
+        },
+        "agents": [],
+        "bindings": [],
+        "identity_bindings": [],
+        "approvals": [],
+    }
+    gateway_core.registry_path().parent.mkdir(parents=True, exist_ok=True)
+    gateway_core.registry_path().write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = gateway_core.load_gateway_registry()
+    assert "space_id" not in loaded["gateway"]
+    assert "space_name" not in loaded["gateway"]
+    # Gateway-specific metadata must be preserved.
+    assert loaded["gateway"]["gateway_id"] == "gw-test"
+    assert loaded["gateway"]["session_connected"] is True
+
+
+def test_status_payload_active_space_sourced_from_session_only(monkeypatch, tmp_path):
+    """Top-level status.space_id/space_name must come from session.json. The
+    nested gateway block must not carry duplicate space_id/space_name even if
+    callers pass the registry through it (the load-time strip enforces this)."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+            "username": "madtank",
+        }
+    )
+    legacy = {
+        "version": 1,
+        "gateway": {
+            "gateway_id": "gw-test",
+            "space_id": "some-other-space",
+            "space_name": "Wrong Workspace",
+            "session_connected": True,
+            "desired_state": "running",
+            "effective_state": "running",
+        },
+        "agents": [],
+        "bindings": [],
+        "identity_bindings": [],
+        "approvals": [],
+    }
+    gateway_core.registry_path().write_text(json.dumps(legacy), encoding="utf-8")
+
+    payload = gateway_cmd._status_payload(activity_limit=1)
+
+    assert payload["space_id"] == _GOOD_SPACE_UUID
+    assert payload["space_name"] == "madtank's Workspace"
+    assert "space_id" not in payload["gateway"]
+    assert "space_name" not in payload["gateway"]
+
+
+def test_resolve_space_ref_uses_cache_when_upstream_429(monkeypatch, tmp_path):
+    """A slug we have ever resolved before must be re-resolvable from the
+    spaces cache without going upstream — so transient 429s on list_spaces
+    don't break `gateway spaces use <slug>`."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    team_uuid = "78950af5-4d27-441b-9296-ec46de8ba35d"
+    gateway_core.save_space_cache(
+        [
+            {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank-workspace"},
+            {"id": team_uuid, "name": "aX CLI Dev", "slug": "ax-cli-dev"},
+        ]
+    )
+
+    class Boom:
+        def list_spaces(self):
+            raise AssertionError("upstream must NOT be called when the cache has the slug")
+
+    from ax_cli.config import _resolve_space_ref
+
+    resolved = _resolve_space_ref(Boom(), "ax-cli-dev", source="explicit")
+    assert resolved == team_uuid
+
+
+def test_normalize_spaces_response_hydrates_name_from_cache(monkeypatch, tmp_path):
+    """If upstream returns a row with a missing/empty name, the UI must
+    surface the cached friendly name for previously-seen spaces instead of
+    falling back to the raw UUID."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [
+            {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
+        ]
+    )
+
+    upstream_partial = [
+        {"id": _GOOD_SPACE_UUID, "name": "", "slug": "madtank"},
+    ]
+    rows = gateway_cmd._normalize_spaces_response(upstream_partial)
+    assert rows[0]["name"] == "madtank's Workspace"
+
+
+def test_runtime_reconcile_skips_phantom_rebinding_after_corruption_repair(monkeypatch, tmp_path):
+    """The reconcile_corrupt_space_ids band-aid repairs entry.space_id from a
+    leaked name to a UUID. The daemon's reconcile() must NOT emit a fake
+    runtime_rebinding event for that purely-cosmetic change."""
+    captured: list[dict] = []
+
+    def fake_record(event, **kwargs):
+        captured.append({"event": event, **kwargs})
+
+    monkeypatch.setattr(gateway_core, "record_gateway_activity", fake_record)
+
+    class FakeRuntime:
+        def __init__(self, entry):
+            self.entry = dict(entry)
+            self._stopped = False
+
+        def stop(self):
+            self._stopped = True
+
+        def start(self):
+            pass
+
+    daemon = gateway_core.GatewayDaemon.__new__(gateway_core.GatewayDaemon)
+    daemon._runtimes = {}
+    daemon.client_factory = lambda: object()
+    daemon.logger = None
+    runtime = FakeRuntime(
+        {
+            "name": "agent-x",
+            "agent_id": "00000000-1111-2222-3333-444444444444",
+            "space_id": "madtank's Workspace",  # legacy non-UUID corruption
+            "base_url": "https://paxai.app",
+            "token_file": "/tmp/agent-token",
+            "runtime_type": "inbox",
+        }
+    )
+    daemon._runtimes["agent-x"] = runtime
+    repaired_entry = {
+        "name": "agent-x",
+        "agent_id": "00000000-1111-2222-3333-444444444444",
+        "space_id": _GOOD_SPACE_UUID,  # repaired by reconcile_corrupt_space_ids
+        "base_url": "https://paxai.app",
+        "token_file": "/tmp/agent-token",
+        "runtime_type": "inbox",
+        "desired_state": "running",
+        "approval_state": "approved",
+        "attestation_state": "verified",
+        "identity_status": "verified",
+        "environment_status": "environment_allowed",
+        "space_status": "active_in_space",
+    }
+
+    daemon._reconcile_runtime(repaired_entry)
+
+    rebindings = [c for c in captured if c["event"] == "runtime_rebinding"]
+    assert rebindings == [], (
+        "reconcile() emitted a phantom runtime_rebinding when the only change was a non-UUID -> UUID space_id repair"
+    )
+    assert runtime.entry["space_id"] == _GOOD_SPACE_UUID
+
+
+# -- Active-space cross-space-move bugfixes ----------------------------------
+
+
+def test_apply_entry_current_space_uses_global_cache_for_unknown_new_space(monkeypatch, tmp_path):
+    """When an agent moves to a space that's NOT in its existing
+    allowed_spaces, apply_entry_current_space must consult the global on-disk
+    space cache before falling back to the (stale) entry.space_name. Without
+    this, active_space_name keeps showing the previous space's name even
+    after the id has updated — exactly the gbr-coordinator split-brain
+    Jacob hit during the move from GBR to madtank's Workspace.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    new_space = "78950af5-4d27-441b-9296-ec46de8ba35d"
+    gateway_core.save_space_cache(
+        [
+            {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
+            {"id": new_space, "name": "Claude Code Workshop", "slug": "claude-code-workshop"},
+        ]
+    )
+    entry = {
+        "name": "agent-x",
+        "space_id": _GOOD_SPACE_UUID,
+        "active_space_id": _GOOD_SPACE_UUID,
+        "active_space_name": "madtank's Workspace",
+        "default_space_id": _GOOD_SPACE_UUID,
+        "default_space_name": "madtank's Workspace",
+        "space_name": "madtank's Workspace",  # legacy field, the prior space
+        "allowed_spaces": [
+            {"space_id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "is_default": True},
+        ],
+    }
+
+    gateway_core.apply_entry_current_space(entry, new_space)
+
+    # Name must come from the global cache, not the stale entry.space_name.
+    assert entry["active_space_id"] == new_space
+    assert entry["active_space_name"] == "Claude Code Workshop"
+    assert entry["default_space_id"] == new_space
+    assert entry["default_space_name"] == "Claude Code Workshop"
+
+
+def test_send_from_managed_agent_bundles_unread_inbox_by_default(monkeypatch, tmp_path):
+    """ax-cli-dev 663d9e6f: every send-as-agent path should bundle "what arrived
+    while you were drafting" so two agents don't talk past each other."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    # Seed a pending message so unread_only's intersection returns it.
+    gateway_core.save_agent_pending_messages(
+        "cli_god",
+        [{"message_id": "msg-1", "content": "first inbound", "queued_at": "2026-05-08T00:00:00Z"}],
+    )
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "send", "cli_god", "thanks!", "--inbox-wait", "0", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["agent"] == "cli_god"
+    assert payload["content"] == "thanks!"
+    assert "inbox" in payload, "default-on inbox bundling missing from response"
+    inbox = payload["inbox"]
+    assert inbox["agent"] == "cli_god"
+    assert inbox["unread_count"] == 1
+    assert any(m.get("id") == "msg-1" for m in inbox["messages"])
+
+
+def test_send_from_managed_agent_skips_inbox_when_disabled(monkeypatch, tmp_path):
+    """`--no-inbox` opts out of the post-send poll entirely."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_agent_pending_messages(
+        "cli_god",
+        [{"message_id": "msg-1", "content": "first inbound", "queued_at": "2026-05-08T00:00:00Z"}],
+    )
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "send", "cli_god", "skip inbox", "--no-inbox", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "inbox" not in payload
+    assert "inbox_error" not in payload
+    # Pending queue is preserved because the post-send poll never ran.
+    assert len(gateway_core.load_agent_pending_messages("cli_god")) == 1
+
+
+def test_send_from_managed_agent_inbox_error_does_not_break_send(monkeypatch, tmp_path):
+    """If the post-send poll raises, the send result still ships and the error
+    is surfaced as inbox_error so the caller sees the partial outcome."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    def boom(**_kwargs):
+        raise RuntimeError("upstream 503")
+
+    monkeypatch.setattr(gateway_cmd, "_poll_managed_agent_inbox_after_send", boom)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "send", "cli_god", "even on error", "--inbox-wait", "0", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    # Send still succeeded.
+    assert payload["agent"] == "cli_god"
+    assert payload["content"] == "even on error"
+    assert payload["message"]["id"] == "msg-sent-1"
+    # Error path surfaces.
+    assert payload.get("inbox_error") == "upstream 503"
+    assert "inbox" not in payload
+
+
+def test_send_from_managed_agent_inbox_returns_empty_when_no_unread(monkeypatch, tmp_path):
+    """An empty inbox still returns the bundle structure with messages=[] and
+    unread_count=0 so callers can rely on the field shape."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    # No pending messages seeded, so unread_only intersection -> empty list.
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "send", "cli_god", "quiet send", "--inbox-wait", "0", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload.get("inbox") is not None
+    assert payload["inbox"]["messages"] == []
+    assert payload["inbox"]["unread_count"] == 0
+
+
+# --- Slug-aware --space coverage (aX task 39f4de3f) -------------------------
+
+
+def test_resolve_space_via_cache_passes_uuid_through_unchanged():
+    uuid_in = "12345678-1234-4234-8234-123456789012"
+    assert gateway_cmd._resolve_space_via_cache(uuid_in) == uuid_in
+
+
+def test_resolve_space_via_cache_resolves_slug_via_cache(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [
+            {"id": "12345678-1234-4234-8234-123456789012", "name": "ax-cli-dev", "slug": "ax-cli-dev"},
+            {"id": "abcdef01-2345-4234-8234-123456789012", "name": "Other", "slug": "other"},
+        ]
+    )
+
+    assert gateway_cmd._resolve_space_via_cache("ax-cli-dev") == "12345678-1234-4234-8234-123456789012"
+
+
+def test_resolve_space_via_cache_returns_none_for_unknown_slug(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache([])
+
+    assert gateway_cmd._resolve_space_via_cache("never-seen") is None
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_resolve_space_via_cache_returns_none_for_empty_input(value):
+    assert gateway_cmd._resolve_space_via_cache(value) is None
+
+
+def test_local_send_resolves_slug_before_proxying(monkeypatch, tmp_path):
+    """`ax gateway local send --space <slug>` resolves through the cache and
+    forwards a UUID to the daemon, so the upstream API never sees the slug."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [{"id": "12345678-1234-4234-8234-123456789012", "name": "ax-cli-dev", "slug": "ax-cli-dev"}]
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return _FakeHttpResponse({"agent": "codex-pass-through", "message": {"id": "msg-1"}})
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return _FakeHttpResponse({"agent": "codex-pass-through", "messages": [], "count": 0})
+
+    def fake_resolve_session(**kwargs):
+        captured["session_space_id"] = kwargs.get("space_id")
+        return ("axgw_s_test.session", {"status": "approved"})
+
+    monkeypatch.setattr(gateway_cmd, "_resolve_local_gateway_session", fake_resolve_session)
+    monkeypatch.setattr(gateway_cmd, "_check_local_pending_replies", lambda **_: {"count": 0, "message_ids": []})
+    monkeypatch.setattr(gateway_cmd.httpx, "post", fake_post)
+    monkeypatch.setattr(gateway_cmd.httpx, "get", fake_get)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "send", "hello", "--space", "ax-cli-dev", "--no-inbox", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["space_id"] == "12345678-1234-4234-8234-123456789012"
+    assert captured["session_space_id"] == "12345678-1234-4234-8234-123456789012"
+
+
+@pytest.mark.parametrize(
+    ("argv", "needs_managed_seed", "needs_no_inbox_hint"),
+    [
+        (["gateway", "local", "send", "hello", "--space", "never-seen", "--no-inbox"], False, True),
+        (["gateway", "agents", "inbox", "cli_god", "--space", "never-seen"], True, False),
+    ],
+)
+def test_unknown_slug_errors_clearly(monkeypatch, tmp_path, argv, needs_managed_seed, needs_no_inbox_hint):
+    if needs_managed_seed:
+        _seed_managed_inbox_agent(tmp_path, monkeypatch)
+
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache([])
+
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_resolve_local_gateway_session",
+        lambda **kwargs: pytest.fail("session must not be opened when slug fails to resolve"),
+    )
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code != 0
+    assert "Could not resolve space" in result.output
+    if needs_no_inbox_hint:
+        assert "ax spaces list" in result.output
+
+
+def test_local_inbox_resolves_slug_before_proxying(monkeypatch, tmp_path):
+    """Same slug → UUID resolution applies to ax gateway local inbox."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [{"id": "12345678-1234-4234-8234-123456789012", "name": "ax-cli-dev", "slug": "ax-cli-dev"}]
+    )
+    captured = {}
+
+    def fake_resolve_session(**kwargs):
+        captured["session_space_id"] = kwargs.get("space_id")
+        return ("axgw_s_test.session", None)
+
+    def fake_poll(**kwargs):
+        captured["poll_space_id"] = kwargs.get("space_id")
+        return {"agent": "codex-pass-through", "messages": []}
+
+    monkeypatch.setattr(gateway_cmd, "_resolve_local_gateway_session", fake_resolve_session)
+    monkeypatch.setattr(gateway_cmd, "_poll_local_inbox_over_http", fake_poll)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "inbox", "--space", "ax-cli-dev", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["session_space_id"] == "12345678-1234-4234-8234-123456789012"
+    assert captured["poll_space_id"] == "12345678-1234-4234-8234-123456789012"
+
+
+def test_agents_inbox_resolves_slug_before_lookup(monkeypatch, tmp_path):
+    """`ax gateway agents inbox --space <slug>` also resolves through the cache."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_space_cache([{"id": "space-1", "name": "Test Space", "slug": "test-space"}])
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+    captured = {}
+
+    real_inbox = gateway_cmd._inbox_for_managed_agent
+
+    def spy_inbox(*, name, limit, channel, space_id, unread_only, mark_read):
+        captured["space_id"] = space_id
+        return real_inbox(
+            name=name,
+            limit=limit,
+            channel=channel,
+            space_id=space_id,
+            unread_only=unread_only,
+            mark_read=mark_read,
+        )
+
+    monkeypatch.setattr(gateway_cmd, "_inbox_for_managed_agent", spy_inbox)
+
+    result = runner.invoke(app, ["gateway", "agents", "inbox", "cli_god", "--space", "test-space", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["space_id"] == "space-1"
+
+
+def test_inbox_for_managed_agent_clears_pending_queue_on_mark_read(monkeypatch, tmp_path):
+    """`ax gateway agents inbox <name> --mark-read` must clear the local
+    pending queue so backlog_depth/queue_depth go to 0. Without this fix
+    the side-app badge stuck at the old count even though the upstream
+    confirmed the messages were marked read — the gbr-coordinator report.
+    """
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_agent_pending_messages(
+        "cli_god",
+        [
+            {"message_id": "m-1", "content": "first", "queued_at": "2026-05-08T00:00:00Z"},
+            {"message_id": "m-2", "content": "second", "queued_at": "2026-05-08T00:01:00Z"},
+            {"message_id": "m-3", "content": "third", "queued_at": "2026-05-08T00:02:00Z"},
+        ],
+    )
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    payload = gateway_cmd._inbox_for_managed_agent(name="cli_god", limit=10, mark_read=True)
+
+    # Endpoint reports how many local items it cleared.
+    assert payload["local_marked_read_count"] == 3
+    # On-disk queue is empty.
+    assert gateway_core.load_agent_pending_messages("cli_god") == []
+    # Registry-side counters reflect the cleared state — that's what the
+    # UI badge actually reads.
+    registry_after = gateway_core.load_gateway_registry()
+    stored = gateway_cmd.find_agent_entry(registry_after, "cli_god")
+    assert stored["backlog_depth"] == 0
+    assert stored["queue_depth"] == 0
+    assert stored["current_status"] is None
+
+
+def test_inbox_for_managed_agent_does_not_touch_pending_queue_without_mark_read(monkeypatch, tmp_path):
+    """Plain peek (`mark_read=False`) must NOT clear the queue — operators
+    inspecting on the agent's behalf shouldn't silently drain the agent's
+    work."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_agent_pending_messages(
+        "cli_god",
+        [{"message_id": "m-1", "content": "first", "queued_at": "2026-05-08T00:00:00Z"}],
+    )
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    gateway_cmd._inbox_for_managed_agent(name="cli_god", limit=10, mark_read=False)
+
+    # Queue is preserved.
+    assert len(gateway_core.load_agent_pending_messages("cli_god")) == 1
+
+
+def test_inbox_for_managed_agent_unread_only_intersects_pending_queue(monkeypatch, tmp_path):
+    """The drawer's `unread_only=true` request must filter the upstream
+    listing to messages the local pending queue tracks. Without this, the
+    upstream returns every message in the agent's view (20 by default) and
+    the drawer shows "3 unread messages" header above a 20-row body —
+    exactly the misalignment Jacob hit on gbr-coordinator."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    # Pending queue has only msg-1 — that's "unread" by Gateway's definition.
+    gateway_core.save_agent_pending_messages(
+        "cli_god",
+        [{"message_id": "msg-1", "content": "queued", "queued_at": "2026-05-08T00:00:00Z"}],
+    )
+
+    class FakeUpstreamClient:
+        def list_messages(self, *, limit, channel, space_id, agent_id, unread_only, mark_read):
+            # Upstream returns ALL recent messages — the filter must happen
+            # on our side using the pending queue.
+            return {
+                "messages": [
+                    {"id": "msg-1", "content": "queued"},
+                    {"id": "msg-2", "content": "already-read"},
+                    {"id": "msg-3", "content": "even-older"},
+                ],
+                "unread_count": 0,
+            }
+
+    class _FactoryClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __getattr__(self, attr):
+            return getattr(FakeUpstreamClient(), attr)
+
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FactoryClient)
+
+    payload = gateway_cmd._inbox_for_managed_agent(name="cli_god", limit=10, unread_only=True)
+
+    # Body must match header: only the messages in the pending queue.
+    assert [m["id"] for m in payload["messages"]] == ["msg-1"]
+    assert payload["unread_count"] == 1
+
+
+# -- Gateway-native --file (upload + send brokered through the agent identity)
+
+
+def test_local_proxy_allowlist_includes_upload_file():
+    """The /local/proxy method allowlist must expose upload_file so agents
+    on the gateway-native path can attach files to messages without holding
+    the user PAT."""
+    spec = gateway_cmd._LOCAL_PROXY_METHODS.get("upload_file")
+    assert spec is not None, "upload_file should be on the local proxy allowlist"
+    # file_path is positional, space_id is keyword — matches AxClient.upload_file.
+    assert "file_path" in spec.get("args", [])
+    assert "space_id" in spec.get("kwargs", [])
+
+
+# -- Promoted from integration tests (docs/integration-tests-gateway.md) --
+# These tests cover bugs found during live operational testing that the
+# existing unit fixtures did not reproduce because they used clean synthetic data.
+
+
+def test_space_name_from_cache_rejects_uuid_stored_as_name():
+    """When the per-agent allowed_spaces cache stores the space UUID as the
+    name field, _space_name_from_cache should treat it as a miss so the
+    caller's or-chain falls through to the global cache.
+
+    Operational finding: after a cold restart the upstream populates
+    allowed_spaces with {"space_id": "<uuid>", "name": "<same-uuid>"},
+    causing active_space_name to show a raw UUID instead of the friendly name.
+    """
+    space_uuid = "0478b063-4100-497d-bbea-2327bea48bc4"
+    allowed_spaces = [{"space_id": space_uuid, "name": space_uuid}]
+
+    result = gateway_core._space_name_from_cache(allowed_spaces, space_uuid)
+
+    # Today this returns the UUID itself (the bug). Once fixed, it should
+    # return None so the or-chain falls through to the global disk cache.
+    # This test documents the expected behavior — it will FAIL until the
+    # fix lands, serving as a regression gate.
+    import re
+
+    uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+    assert result is None or not uuid_pattern.match(result), (
+        f"_space_name_from_cache returned UUID-as-name '{result}' — "
+        "should return None so the global cache fallback is reached"
+    )
+
+
+def test_annotate_runtime_health_resolves_active_space_name_from_global_cache(monkeypatch, tmp_path):
+    """annotate_runtime_health must resolve active_space_name to a friendly
+    name even when the per-agent allowed_spaces cache stores UUID-as-name.
+
+    Operational finding: /api/status and `ax gateway agents show` both
+    showed the raw UUID for active_space_name because annotate_runtime_health
+    only consulted _space_name_from_cache (per-agent), which returned the
+    UUID, and never fell through to space_name_from_cache (global disk).
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+
+    space_uuid = "0478b063-4100-497d-bbea-2327bea48bc4"
+    friendly_name = "ax-gateway"
+
+    gateway_core.save_space_cache(
+        [
+            {"id": space_uuid, "name": friendly_name, "slug": "ax-gateway"},
+        ]
+    )
+
+    binding = {
+        "identity_binding_id": "idbind_test",
+        "asset_id": "asset-1",
+        "gateway_id": "gw-1",
+        "install_id": "install-1",
+        "active_space_id": space_uuid,
+        "default_space_id": space_uuid,
+        "allowed_spaces_cache": [
+            {"space_id": space_uuid, "name": space_uuid},
+        ],
+        "environment": {"base_url": "https://paxai.app"},
+        "acting_identity": {"agent_id": "agent-test-1", "agent_name": "test-agent"},
+    }
+    registry = gateway_core.load_gateway_registry()
+    registry.setdefault("identity_bindings", []).append(binding)
+    registry.setdefault("agents", []).append(
+        {
+            "name": "test-agent",
+            "agent_id": "agent-test-1",
+            "identity_binding_id": "idbind_test",
+            "install_id": "install-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes",
+            "template_id": "hermes",
+            "desired_state": "running",
+            "effective_state": "running",
+            "space_id": space_uuid,
+            "active_space_id": space_uuid,
+            "credential_source": "gateway",
+            "token_file": "/tmp/fake.token",
+        }
+    )
+    gateway_core.save_gateway_registry(registry)
+
+    snapshot = {
+        "name": "test-agent",
+        "agent_id": "agent-test-1",
+        "identity_binding_id": "idbind_test",
+        "install_id": "install-1",
+        "base_url": "https://paxai.app",
+        "runtime_type": "hermes",
+        "template_id": "hermes",
+        "desired_state": "running",
+        "effective_state": "running",
+        "space_id": space_uuid,
+        "active_space_id": space_uuid,
+        "credential_source": "gateway",
+        "token_file": "/tmp/fake.token",
+    }
+
+    annotated = gateway_core.annotate_runtime_health(snapshot, registry=registry)
+
+    import re
+
+    uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+    active_name = annotated.get("active_space_name", "")
+    assert not uuid_pattern.match(active_name), (
+        f"active_space_name is a raw UUID '{active_name}' — should be '{friendly_name}' from the global disk cache"
+    )
+    assert active_name == friendly_name
+
+
+def test_apply_entry_current_space_falls_through_uuid_name_to_global_cache(monkeypatch, tmp_path):
+    """apply_entry_current_space must reach the global disk cache when the
+    per-agent allowed_spaces has UUID-as-name for the target space.
+
+    This is a variant of the existing test at line 7072, but with the
+    critical difference: the agent's allowed_spaces entry has the UUID
+    stored as the name (the real-world failure mode) rather than a clean
+    friendly name (the synthetic fixture that masks the bug).
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+
+    space_uuid = _GOOD_SPACE_UUID
+    friendly_name = "madtank's Workspace"
+
+    gateway_core.save_space_cache(
+        [
+            {"id": space_uuid, "name": friendly_name, "slug": "madtank"},
+        ]
+    )
+
+    entry = {
+        "name": "agent-x",
+        "space_id": space_uuid,
+        "active_space_id": space_uuid,
+        "active_space_name": space_uuid,
+        "default_space_id": space_uuid,
+        "default_space_name": space_uuid,
+        "space_name": space_uuid,
+        "allowed_spaces": [
+            {"space_id": space_uuid, "name": space_uuid, "is_default": True},
+        ],
+    }
+
+    gateway_core.apply_entry_current_space(entry, space_uuid)
+
+    import re
+
+    uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+    assert not uuid_pattern.match(entry["active_space_name"]), (
+        f"active_space_name is still UUID '{entry['active_space_name']}' — "
+        f"should be '{friendly_name}' from the global disk cache"
+    )
+    assert entry["active_space_name"] == friendly_name
+
+
+def test_proxy_upload_file_rejects_path_outside_workdir(monkeypatch, tmp_path):
+    """The proxy handler must reject upload_file requests where file_path
+    resolves outside the agent's registered workdir.
+
+    Operational finding: /tmp/gateway-security-test.md (completely outside
+    any agent workdir) was successfully uploaded to paxai.app through the
+    agent's managed PAT. No path restriction was enforced.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+
+    agent_workdir = tmp_path / "agent-home"
+    agent_workdir.mkdir()
+    outside_file = tmp_path / "sensitive.md"
+    outside_file.write_text("secret content")
+
+    token_file = tmp_path / "agent.token"
+    token_file.write_text("axp_a_test.token")
+
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "tester",
+        }
+    )
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "sandboxed-agent",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes",
+            "template_id": "hermes",
+            "desired_state": "running",
+            "effective_state": "running",
+            "approval_state": "approved",
+            "token_file": str(token_file),
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "workdir": str(agent_workdir),
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    entry = registry["agents"][0]
+    session = gateway_core.issue_local_session(registry, entry)
+    gateway_core.save_gateway_registry(registry)
+    session_token = session["session_token"]
+
+    uploaded = False
+
+    class _SpyClient:
+        def __init__(self, **kw):
+            pass
+
+        def upload_file(self, file_path, *, space_id=None):
+            nonlocal uploaded
+            uploaded = True
+            return {"id": "file-1", "filename": "sensitive.md"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gateway_cmd, "AxClient", _SpyClient)
+
+    # Attempt to upload a file outside the agent's workdir
+    try:
+        gateway_cmd._proxy_local_session_call(
+            session_token=session_token,
+            body={"method": "upload_file", "args": {"file_path": str(outside_file)}},
+        )
+        # If we get here without an error, the path was not validated.
+        # This test documents the expected fix — it will FAIL until
+        # path sandboxing is implemented.
+        assert not uploaded, (
+            f"upload_file accepted path outside workdir: {outside_file} "
+            f"(workdir={agent_workdir}). The proxy must reject this."
+        )
+    except (ValueError, PermissionError) as exc:
+        # Expected after the fix: proxy should raise on path traversal
+        assert "workdir" in str(exc).lower() or "path" in str(exc).lower() or "outside" in str(exc).lower()
+
+
+def test_local_route_failure_guidance_404_suggests_recovery():
+    msg = gateway_cmd._local_route_failure_guidance(
+        detail="not found",
+        status_code=404,
+        gateway_url="http://127.0.0.1:8765",
+        agent_name="wishy",
+        workdir="/repo",
+        action="local connect",
+    )
+    assert "Gateway local connect failed for @wishy: not found" in msg
+    # The whole point of this PR — the message must point at the Live Listener
+    # case so users running `ax auth whoami` in a claude_code_channel workspace
+    # don't get a bare "not found".
+    assert "Live Listener" in msg
+    assert "claude_code_channel" in msg
+    assert "ax gateway agents list --json" in msg
+    assert "ax gateway local connect wishy --workdir /repo" in msg
+    assert "http://127.0.0.1:8765" in msg
+
+
+def test_local_route_failure_guidance_non_404_stays_terse():
+    msg = gateway_cmd._local_route_failure_guidance(
+        detail="connection refused",
+        status_code=None,
+        gateway_url="http://127.0.0.1:8765/",
+        agent_name=None,
+        workdir=None,
+        action="proxy whoami",
+    )
+    assert "Gateway proxy whoami failed for this workspace: connection refused" in msg
+    assert "Live Listener" not in msg  # only suggested for 404s
+    assert "Or open http://127.0.0.1:8765 to inspect Gateway agents." in msg
+
+
+def test_gateway_local_connect_404_uses_actionable_guidance(monkeypatch):
+    """Regression for #150: a 404 from /local/connect must point at the Live Listener path."""
+    from ax_cli.commands import messages as messages_cmd
+
+    class _FakeResponse:
+        status_code = 404
+
+        @staticmethod
+        def json():
+            return {"error": "not found"}
+
+        text = '{"error": "not found"}'
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("404", request=None, response=self)
+
+    def _fake_post(*args, **kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    import typer
+
+    with pytest.raises(typer.BadParameter) as excinfo:
+        messages_cmd._gateway_local_connect(
+            gateway_url="http://127.0.0.1:8765",
+            agent_name="wishy",
+            registry_ref=None,
+            workdir="/repo",
+            space_id=None,
+        )
+    msg = str(excinfo.value)
+    assert "@wishy" in msg
+    assert "Live Listener" in msg
+    assert "ax gateway local connect wishy --workdir /repo" in msg

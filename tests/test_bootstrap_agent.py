@@ -465,7 +465,11 @@ def test_create_agent_in_space_409_falls_back_to_existing(monkeypatch):
     existing_agent = {"id": AGENT_ID, "name": "switchboard-12d6eafd", "space_id": SPACE_ID}
     http = _FakeHttp(
         {
-            ("POST", "/api/v1/agents"): (409, {"detail": "Agent 'switchboard-12d6eafd' already exists in this space"}, None),
+            ("POST", "/api/v1/agents"): (
+                409,
+                {"detail": "Agent 'switchboard-12d6eafd' already exists in this space"},
+                None,
+            ),
             ("GET", "/api/v1/agents"): (200, {"agents": [existing_agent]}, None),
         }
     )
@@ -494,9 +498,7 @@ def test_create_agent_in_space_409_with_no_match_re_raises(monkeypatch):
     )
     client = _FakeClient(http)
     with pytest.raises(httpx.HTTPStatusError) as exc:
-        bootstrap_cmd._create_agent_in_space(
-            client, name="mystery", space_id=SPACE_ID, description=None, model=None
-        )
+        bootstrap_cmd._create_agent_in_space(client, name="mystery", space_id=SPACE_ID, description=None, model=None)
     assert exc.value.response.status_code == 409
 
 
@@ -509,7 +511,5 @@ def test_create_agent_in_space_other_errors_still_raise(monkeypatch):
     )
     client = _FakeClient(http)
     with pytest.raises(httpx.HTTPStatusError) as exc:
-        bootstrap_cmd._create_agent_in_space(
-            client, name="x", space_id=SPACE_ID, description=None, model=None
-        )
+        bootstrap_cmd._create_agent_in_space(client, name="x", space_id=SPACE_ID, description=None, model=None)
     assert exc.value.response.status_code == 500

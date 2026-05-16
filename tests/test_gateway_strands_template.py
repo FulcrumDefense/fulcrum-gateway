@@ -35,8 +35,7 @@ BRIDGE_PATH = REPO_ROOT / "examples" / "gateway_strands" / "strands_bridge.py"
 def test_strands_template_is_registered() -> None:
     catalog = agent_template_catalog()
     assert "strands" in catalog, (
-        "strands template missing from agent_template_catalog. "
-        "Should sit alongside langgraph / ollama / hermes."
+        "strands template missing from agent_template_catalog. Should sit alongside langgraph / ollama / hermes."
     )
 
     template = agent_template_definition("strands")

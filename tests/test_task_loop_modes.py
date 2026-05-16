@@ -65,12 +65,19 @@ def test_add_accepts_priority_and_mode(monkeypatch, tmp_path):
     result = runner.invoke(
         app,
         [
-            "reminders", "add", "task-A",
-            "--target", "orion",
-            "--priority", "10",
-            "--mode", "draft",
-            "--first-in-minutes", "0",
-            "--file", str(policy_file),
+            "reminders",
+            "add",
+            "task-A",
+            "--target",
+            "orion",
+            "--priority",
+            "10",
+            "--mode",
+            "draft",
+            "--first-in-minutes",
+            "0",
+            "--file",
+            str(policy_file),
             "--json",
         ],
     )
@@ -87,8 +94,20 @@ def test_add_rejects_invalid_priority(monkeypatch, tmp_path):
 
     result = runner.invoke(
         app,
-        ["reminders", "add", "task-A", "--target", "orion", "--priority", "999",
-         "--first-in-minutes", "0", "--file", str(policy_file), "--json"],
+        [
+            "reminders",
+            "add",
+            "task-A",
+            "--target",
+            "orion",
+            "--priority",
+            "999",
+            "--first-in-minutes",
+            "0",
+            "--file",
+            str(policy_file),
+            "--json",
+        ],
     )
     assert result.exit_code != 0
     assert "priority" in result.output.lower()
@@ -101,8 +120,20 @@ def test_add_rejects_invalid_mode(monkeypatch, tmp_path):
 
     result = runner.invoke(
         app,
-        ["reminders", "add", "task-A", "--target", "orion", "--mode", "weird",
-         "--first-in-minutes", "0", "--file", str(policy_file), "--json"],
+        [
+            "reminders",
+            "add",
+            "task-A",
+            "--target",
+            "orion",
+            "--mode",
+            "weird",
+            "--first-in-minutes",
+            "0",
+            "--file",
+            str(policy_file),
+            "--json",
+        ],
     )
     assert result.exit_code != 0
     assert "mode" in result.output.lower()
@@ -276,9 +307,7 @@ def test_drafts_send_dispatches_via_api(monkeypatch, tmp_path):
         )
     )
 
-    result = runner.invoke(
-        app, ["reminders", "drafts", "send", "draft-abc", "--file", str(policy_file), "--json"]
-    )
+    result = runner.invoke(app, ["reminders", "drafts", "send", "draft-abc", "--file", str(policy_file), "--json"])
     assert result.exit_code == 0, result.output
     assert len(fake.sent) == 1
     sent = fake.sent[0]
@@ -312,9 +341,7 @@ def test_drafts_cancel_does_not_send(monkeypatch, tmp_path):
             }
         )
     )
-    result = runner.invoke(
-        app, ["reminders", "drafts", "cancel", "draft-xyz", "--file", str(policy_file), "--json"]
-    )
+    result = runner.invoke(app, ["reminders", "drafts", "cancel", "draft-xyz", "--file", str(policy_file), "--json"])
     assert result.exit_code == 0, result.output
     assert fake.sent == []
     draft = _load(policy_file)["drafts"][0]
@@ -344,8 +371,7 @@ def test_drafts_edit_updates_body_with_mention_prefix(monkeypatch, tmp_path):
     )
     result = runner.invoke(
         app,
-        ["reminders", "drafts", "edit", "draft-edit", "--body", "revised text",
-         "--file", str(policy_file), "--json"],
+        ["reminders", "drafts", "edit", "draft-edit", "--body", "revised text", "--file", str(policy_file), "--json"],
     )
     assert result.exit_code == 0, result.output
     draft = _load(policy_file)["drafts"][0]
@@ -387,15 +413,16 @@ def test_pause_resume_cycle(monkeypatch, tmp_path):
     result = runner.invoke(app, ["reminders", "pause", "rem-pause", "--file", str(policy_file), "--json"])
     assert result.exit_code == 0, result.output
     policy = _load(policy_file)["policies"][0]
-    assert policy["enabled"] is False
-    assert policy["disabled_reason"] == "paused"
+    assert policy["enabled"] is True
+    assert policy["paused"] is True
+    assert policy["paused_reason"] == "Paused by operator."
 
     # Resume
     result = runner.invoke(app, ["reminders", "resume", "rem-pause", "--file", str(policy_file), "--json"])
     assert result.exit_code == 0, result.output
     policy = _load(policy_file)["policies"][0]
     assert policy["enabled"] is True
-    assert "disabled_reason" not in policy
+    assert policy["paused"] is False
 
 
 def test_update_priority_reorders_queue(monkeypatch, tmp_path):

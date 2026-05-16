@@ -3,6 +3,17 @@ import json
 from typer.testing import CliRunner
 
 from ax_cli.commands import qa
+from ax_cli.commands.qa import (
+    _attachment_ref,
+    _count,
+    _error_payload,
+    _extract_items,
+    _message_from_response,
+    _message_id,
+    _normalize_upload,
+    _run_check,
+    _summarize_collection,
+)
 from ax_cli.main import app
 
 runner = CliRunner()
@@ -490,3 +501,128 @@ def test_matrix_without_configured_envs_returns_skipped_envelope(monkeypatch, tm
         "env_count": 0,
     }
     assert payload["details"] == []
+
+
+# ---- QA helper functions ----
+
+
+def test_extract_items_list():
+    assert _extract_items([{"a": 1}, "skip", {"b": 2}], ("items",)) == [{"a": 1}, {"b": 2}]
+
+
+def test_extract_items_dict():
+    assert _extract_items({"items": [{"a": 1}]}, ("items",)) == [{"a": 1}]
+
+
+def test_extract_items_non_dict():
+    assert _extract_items("string", ("items",)) == []
+
+
+def test_extract_items_nested():
+    payload = {"wrapper": {"items": [{"a": 1}]}}
+    assert _extract_items(payload, ("wrapper", "items")) == [{"a": 1}]
+
+
+def test_count_with_total():
+    assert _count({"total": 42, "items": [{"a": 1}]}, ("items",)) == 42
+
+
+def test_count_fallback_to_items():
+    assert _count({"items": [{"a": 1}, {"b": 2}]}, ("items",)) == 2
+
+
+def test_count_from_list():
+    assert _count([{"a": 1}], ("items",)) == 1
+
+
+def test_error_payload_generic():
+    result = _error_payload(ValueError("test error"))
+    assert result["type"] == "ValueError"
+    assert result["detail"] == "test error"
+
+
+def test_error_payload_http():
+    import httpx
+
+    request = httpx.Request("GET", "http://test.local/api")
+    response = httpx.Response(400, request=request, json={"error": "bad request"})
+    exc = httpx.HTTPStatusError("400", request=request, response=response)
+    result = _error_payload(exc)
+    assert result["status_code"] == 400
+    assert result["detail"] == {"error": "bad request"}
+
+
+def test_run_check_success():
+    checks = []
+    result = _run_check(checks, "test_check", lambda: {"data": "ok"})
+    assert result == {"data": "ok"}
+    assert checks[0]["ok"] is True
+    assert checks[0]["name"] == "test_check"
+
+
+def test_run_check_with_summarize():
+    checks = []
+    _run_check(checks, "test", lambda: [1, 2, 3], summarize=lambda p: {"count": len(p)})
+    assert checks[0]["count"] == 3
+
+
+def test_run_check_failure():
+    checks = []
+    result = _run_check(checks, "test", lambda: 1 / 0)
+    assert result is None
+    assert checks[0]["ok"] is False
+    assert "error" in checks[0]
+
+
+def test_summarize_collection():
+    summarize = _summarize_collection(("items",))
+    result = summarize({"items": [{"a": 1}, {"b": 2}]})
+    assert result["count"] == 2
+
+
+def test_normalize_upload():
+    data = {
+        "attachment": {
+            "id": "att-1",
+            "url": "https://example.com/file",
+            "content_type": "text/plain",
+            "size": 1024,
+            "original_filename": "test.txt",
+        }
+    }
+    result = _normalize_upload(data)
+    assert result["attachment_id"] == "att-1"
+    assert result["filename"] == "test.txt"
+
+
+def test_normalize_upload_flat():
+    data = {"id": "att-2", "url": "https://example.com/f", "content_type": "image/png", "size": 512}
+    result = _normalize_upload(data)
+    assert result["attachment_id"] == "att-2"
+
+
+def test_attachment_ref():
+    info = {"attachment_id": "a1", "filename": "f.txt", "content_type": "text/plain", "size": 100, "url": "http://x"}
+    result = _attachment_ref(info, context_key="ctx:key")
+    assert result["id"] == "a1"
+    assert result["context_key"] == "ctx:key"
+
+
+def test_message_from_response_dict():
+    assert _message_from_response({"message": {"id": "m1"}}) == {"id": "m1"}
+
+
+def test_message_from_response_flat():
+    assert _message_from_response({"id": "m1"}) == {"id": "m1"}
+
+
+def test_message_from_response_non_dict():
+    assert _message_from_response("string") == {}
+
+
+def test_message_id_found():
+    assert _message_id({"message": {"id": "m1"}}) == "m1"
+
+
+def test_message_id_none():
+    assert _message_id({}) is None
