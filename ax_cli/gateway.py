@@ -54,7 +54,6 @@ MIN_HANDLER_TIMEOUT_SECONDS = 1
 SSE_IDLE_TIMEOUT_SECONDS = 45.0
 RUNTIME_STALE_AFTER_SECONDS = 75.0
 RUNTIME_HIDDEN_AFTER_SECONDS = 15 * 60.0  # default: hide stale agents after 15 min
-SETUP_ERROR_BACKOFF_SECONDS = 30.0  # silence retry storm after a runtime setup error
 SETUP_ERROR_BACKOFF_SCHEDULE = (30.0, 60.0, 120.0, 300.0, 600.0)
 SETUP_ERROR_MAX_CONSECUTIVE = 10
 # active = visible, normal operation
@@ -4283,6 +4282,11 @@ class ManagedAgentRuntime:
             "last_reply_message_id": None,
             "last_reply_preview": None,
             "reconnect_backoff_seconds": 0,
+            "consecutive_setup_errors": int(entry.get("consecutive_setup_errors") or 0),
+            "last_setup_error_signature": entry.get("last_setup_error_signature"),
+            "setup_disabled": bool(entry.get("setup_disabled")),
+            "setup_disabled_at": entry.get("setup_disabled_at"),
+            "setup_disabled_reason": entry.get("setup_disabled_reason"),
         }
 
     @property
@@ -4440,20 +4444,24 @@ class ManagedAgentRuntime:
 
     def _record_setup_error(self, error: str) -> None:
         signature = error[:120]
-        prev_sig = self.entry.get("last_setup_error_signature")
+        with self._state_lock:
+            prev_sig = self._state.get("last_setup_error_signature")
+            prev_count = int(self._state.get("consecutive_setup_errors") or 0)
         if prev_sig == signature:
-            count = int(self.entry.get("consecutive_setup_errors") or 0) + 1
+            count = prev_count + 1
         else:
             count = 1
-        self.entry["consecutive_setup_errors"] = count
-        self.entry["last_setup_error_signature"] = signature
         self._update_state(
             effective_state="error",
             current_status="error",
             current_activity=error,
             last_error=error,
             last_runtime_error_at=_now_iso(),
+            consecutive_setup_errors=count,
+            last_setup_error_signature=signature,
         )
+        self.entry["consecutive_setup_errors"] = count
+        self.entry["last_setup_error_signature"] = signature
         self.entry["last_runtime_error_at"] = self._state.get("last_runtime_error_at")
         record_gateway_activity(
             "runtime_error",
@@ -4463,9 +4471,16 @@ class ManagedAgentRuntime:
         )
         self._log(f"setup error ({count}/{SETUP_ERROR_MAX_CONSECUTIVE}): {error}")
         if count >= SETUP_ERROR_MAX_CONSECUTIVE:
+            disabled_at = _now_iso()
+            reason = f"Auto-disabled after {count} consecutive setup errors: {error[:200]}"
+            self._update_state(
+                setup_disabled=True,
+                setup_disabled_at=disabled_at,
+                setup_disabled_reason=reason,
+            )
             self.entry["setup_disabled"] = True
-            self.entry["setup_disabled_at"] = _now_iso()
-            self.entry["setup_disabled_reason"] = f"Auto-disabled after {count} consecutive setup errors: {error[:200]}"
+            self.entry["setup_disabled_at"] = disabled_at
+            self.entry["setup_disabled_reason"] = reason
             record_gateway_activity(
                 "runtime_auto_disabled",
                 entry=self.entry,
@@ -4475,11 +4490,15 @@ class ManagedAgentRuntime:
             self._log(f"auto-disabled after {count} consecutive setup errors")
 
     def _clear_setup_error_state(self) -> None:
-        self.entry["consecutive_setup_errors"] = 0
-        self.entry["last_setup_error_signature"] = None
-        self.entry["setup_disabled"] = False
-        self.entry["setup_disabled_at"] = None
-        self.entry["setup_disabled_reason"] = None
+        fields = {
+            "consecutive_setup_errors": 0,
+            "last_setup_error_signature": None,
+            "setup_disabled": False,
+            "setup_disabled_at": None,
+            "setup_disabled_reason": None,
+        }
+        self._update_state(**fields)
+        self.entry.update(fields)
 
     def start(self) -> None:
         if self.entry.get("setup_disabled"):

@@ -6389,7 +6389,7 @@ def test_runtime_start_proceeds_after_setup_error_backoff_expires(monkeypatch, t
 
     # last_runtime_error_at older than the backoff window.
     long_ago = (
-        datetime.now(timezone.utc) - timedelta(seconds=gateway_core.SETUP_ERROR_BACKOFF_SECONDS + 60)
+        datetime.now(timezone.utc) - timedelta(seconds=gateway_core.SETUP_ERROR_BACKOFF_SCHEDULE[0] + 60)
     ).isoformat()
 
     runtime = gateway_core.ManagedAgentRuntime(
