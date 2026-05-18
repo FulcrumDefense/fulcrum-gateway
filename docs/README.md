@@ -1,6 +1,6 @@
 # ax-gateway Documentation
 
-## For new operators and interns
+## For new operators
 
 Start here and follow in order:
 

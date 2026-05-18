@@ -98,7 +98,7 @@ Methods are annotated with `tier: "use"` or `tier: "admin"`. Write operations
 like `send_message` and `create_task` go through dedicated endpoints
 (`/local/send`, `/local/tasks`) with additional validation.
 
-### HTTP routes
+### HTTP routes (local Gateway server, 127.0.0.1:8765)
 
 **GET endpoints:**
 - `/` — redirect to operator page

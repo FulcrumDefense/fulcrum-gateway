@@ -10,7 +10,7 @@
 
 ### The aX Platform
 
-![Platform overview — users and agents connect to the aX Platform via SSE](images/platform-overview.png)
+![Platform overview — users and agents connect to the aX Platform via SSE](images/platform-overview.svg)
 
 The aX Platform is a multi-agent communication system. Agents (software
 processes) register, exchange messages, create tasks, and collaborate within
@@ -53,7 +53,7 @@ ax-gateway/
 │   ├── main.py                # Typer app entry point, registers all subcommands
 │   ├── client.py              # AxClient — wraps all aX REST API endpoints
 │   ├── config.py              # Config resolution: CLI flag → env var → .ax/config.toml → profile → global
-│   ├── gateway.py             # Gateway daemon: state mgmt, reconcile loop, session tokens (5846 lines)
+│   ├── gateway.py             # Gateway daemon: state mgmt, reconcile loop, session tokens (6403 lines)
 │   ├── gateway_runtime_types.py  # Runtime type definitions (hermes, echo, exec, etc.)
 │   ├── output.py              # Shared output: print_json(), print_table(), handle_error()
 │   ├── avatar.py              # Agent avatar generation
@@ -114,7 +114,7 @@ ax-gateway/
 
 ![Config resolution cascade — CLI flag, env var, project config, profile, global](images/config-resolution-cascade.png)
 
-**Key relationship:** `ax_cli/gateway.py` (5846 lines) handles state and the
+**Key relationship:** `ax_cli/gateway.py` (6403 lines) handles state and the
 daemon loop. `ax_cli/commands/gateway.py` handles the CLI commands, HTTP server,
 proxy dispatcher, and UI HTML. They work as a pair — see the
 [module guide](module-guide-gateway.md) for a section-by-section map.
@@ -127,19 +127,19 @@ proxy dispatcher, and UI HTML. They work as a pair — see the
 | Term                            | Definition                                                                                                                                                           | Where in code                                                                  |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | **Gateway**                     | Local HTTP daemon (`127.0.0.1:8765`) that brokers credentials, proxies API calls, and manages agent lifecycles on the operator's machine.                            | `ax_cli/gateway.py` (state/lifecycle), `ax_cli/commands/gateway.py` (CLI/HTTP) |
-| **Space**                       | An organizational container on paxai.app. Agents, messages, and tasks belong to a space. Resolved by slug or UUID.                                                   | Space resolution cascade in `ax_cli/gateway.py:1534–1648`                      |
+| **Space**                       | An organizational container on paxai.app. Agents, messages, and tasks belong to a space. Resolved by slug or UUID.                                                   | Space resolution cascade in `ax_cli/gateway.py`                                |
 | **PAT (Personal Access Token)** | Long-lived credential for authenticating with the aX API. User PATs (`axp_u_...`) live in `~/.ax/user.toml`; agent-scoped PATs (`axp_a_...`) are managed by Gateway. | `ax_cli/config.py` (resolution), `ax_cli/gateway.py` (minting)                 |
 | **User PAT**                    | A PAT scoped to the operator. Used for bootstrap, setup, and minting agent PATs. Must never be used as an agent runtime credential.                                  | See [Agent Authentication](agent-authentication.md)                            |
 | **Agent-scoped PAT**            | A PAT locked to one agent. Minted by the operator's user PAT, stored by Gateway. Each agent gets exactly one.                                                        | `~/.ax/gateway/agents/<name>/token`                                            |
 | **Managed agent**               | An agent whose lifecycle (start, stop, credentials, space binding) is controlled by Gateway. Contrast with a standalone CLI agent using direct profiles.             | Registry entries in `~/.ax/gateway/registry.json`                              |
-| **Reconcile loop**              | The daemon's periodic check (~10s) that each agent's effective state matches its desired state. Handles restarts, rebindings, and health annotation.                 | `GatewayDaemon.run()` in `ax_cli/gateway.py:5767`                              |
+| **Reconcile loop**              | The daemon's periodic check (~1s) that each agent's effective state matches its desired state. Handles restarts, rebindings, and health annotation.                  | `GatewayDaemon.run()` in `ax_cli/gateway.py`                                   |
 | **Desired state**               | What the operator wants an agent to be (e.g. `running`, `stopped`). Set by CLI commands.                                                                             | `desired_state` field in registry entries                                      |
 | **Effective state**             | What Gateway actually observes about the agent process (e.g. `running`, `error`, `pending_approval`). May lag desired state.                                         | `effective_state` field in registry entries                                    |
-| **Presence**                    | What the upstream platform reports about agent liveness (`online`, `offline`, `stale`). Informational — not directly controlled by Gateway.                          | Upstream API, shown in `agents show`                                           |
-| **Proxy dispatcher**            | The `_LOCAL_PROXY_METHODS` allowlist that controls which `AxClient` methods an agent session can call through `/local/proxy`.                                        | `ax_cli/commands/gateway.py:540`                                               |
-| **Session token**               | Short-lived, per-connect token (`axgw_s_...`) issued when a local agent connects to Gateway. HMAC-SHA256 signed. Not cached or reused.                               | `issue_local_session()` in `ax_cli/gateway.py:1327`                            |
-| **Binding**                     | The association between a managed agent and a space + identity. Can become stale ("phantom rebinding") if upstream state changes without Gateway knowing.            | `evaluate_identity_space_binding()` in `ax_cli/gateway.py:1955`                |
-| **Pending queue**               | Per-agent local queue of messages received but not yet acknowledged. Stored at `~/.ax/gateway/agents/<name>/pending.json`. Cleared by `mark_read`.                   | `ax_cli/gateway.py:2845–2900`                                                  |
+| **Presence**                    | What Gateway derives about agent liveness (`IDLE`, `OFFLINE`, `STALE`, `ERROR`, `BLOCKED`). Informational — not used for lifecycle decisions.                        | `_derive_presence()`, shown in `agents show`                                   |
+| **Proxy dispatcher**            | The `_LOCAL_PROXY_METHODS` allowlist that controls which `AxClient` methods an agent session can call through `/local/proxy`.                                        | `ax_cli/commands/gateway.py`                                                   |
+| **Session token**               | Short-lived, per-connect token (`axgw_s_...`) issued when a local agent connects to Gateway. HMAC-SHA256 signed. Not cached or reused.                               | `issue_local_session()` in `ax_cli/gateway.py`                                 |
+| **Binding**                     | The association between a managed agent and a space + identity. Can become stale ("phantom rebinding") if upstream state changes without Gateway knowing.            | `evaluate_identity_space_binding()` in `ax_cli/gateway.py`                     |
+| **Pending queue**               | Per-agent local queue of messages received but not yet acknowledged. Stored at `~/.ax/gateway/agents/<name>/pending.json`. Cleared by `mark_read`.                   | `ax_cli/gateway.py`                                                            |
 | **Inbox agent**                 | An agent that polls for messages via the pending queue. Background worker pattern — checks in periodically.                                                          | `inbox` template type                                                          |
 | **Channel agent**               | A Claude Code Channel — a live attached listener using an SSE connection. Contrast with inbox agents that poll.                                                      | `claude_code_channel` template type                                            |
 | **Pass-through agent**          | A local agent that authenticates to Gateway, gets approved, then polls its mailbox. The simplest local agent pattern.                                                | `pass_through` template type                                                   |
@@ -148,7 +148,7 @@ proxy dispatcher, and UI HTML. They work as a pair — see the
 | **Profile**                     | A named CLI configuration that bundles a token file, base URL, agent name/ID, and fingerprint verification. Alternative to Gateway-managed identity.                 | `ax_cli/config.py`, `ax profile` commands                                      |
 | **Fingerprint**                 | Composite SHA-256 hash of workdir + hostname + OS user, sent as `X-AX-FP` header. Detects credential misuse from unexpected locations.                               | See [Credential Security](credential-security.md)                              |
 
-![Profile fingerprint flow — add, verify, activate or refuse](images/profile-fingerprint-flow.png)
+![Profile fingerprint flow — add, verify, activate or refuse](images/profile-fingerprint-flow.svg)
 | `**use`/`admin` tiers**         | Proposed access control model (issue #146) to replace the flat proxy allowlist with per-agent permission tiers.                                                      | See [ADR-006](adr/ADR-006-use-admin-proxy-tiers.md)                            |
 
 
@@ -261,7 +261,7 @@ bootstrap token is consumed and discarded during enrollment).
 
 Each scenario follows: **Goal** → **Prerequisites** → **Steps** (with expected output) → **Verify** → **What can go wrong**.
 
-![Handoff loop — task, watch, result with timeout recovery](images/supervision-loop.png)
+![Handoff loop — task, watch, result with timeout recovery](images/supervision-loop.svg)
 
 ---
 

@@ -15,7 +15,7 @@ registering an agent, and sending your first message.
 pip install axctl
 
 # Or editable install for contributors
-git clone https://github.com/ax-platform/ax-gateway.git
+git clone https://github.com/FulcrumDefense/ax-gateway.git
 cd ax-gateway
 pip install -e .
 ```
@@ -35,31 +35,21 @@ ax --help
 
 ## Step 2: Login
 
-There are two login paths depending on whether you are running Gateway:
+First, get a user PAT: log in to [paxai.app](https://paxai.app), click the
+gear icon, select **All Settings**, go to the **Credentials** tab, and create
+a **User Token** with **CLI** class.
 
-### Option A: Gateway login (recommended)
-
-If you are starting Gateway (Step 4), use the Gateway login. This is the
-preferred path because Gateway brokers all agent credentials — logging in
-through Gateway means agents never see or need the user PAT.
-
-```bash
-ax gateway login
-```
-
-You will be prompted for your user PAT (`axp_u_...`). Gateway stores it in its
-own session state, separate from agent runtime config. After login, Gateway
-can mint agent-scoped credentials automatically when you register agents.
-
-### Option B: Standalone CLI login
-
-If you are using the CLI without Gateway (direct API work, administration):
+Log in to the CLI and to Gateway. Both commands prompt for the same user PAT —
+the CLI stores it for direct API work, and Gateway stores it separately to
+broker agent credentials.
 
 ```bash
-ax auth login
-```
+# CLI login — stores token in ~/.ax/user.toml
+ax login --url https://paxai.app
 
-The CLI stores the token in `~/.ax/user.toml`, separate from agent config.
+# Gateway login — stores token in Gateway session state
+ax gateway login --url https://paxai.app
+```
 
 ### Verify
 
@@ -69,7 +59,7 @@ ax auth whoami
 
 **Expected output:** Your username, email, and the spaces you belong to.
 
-> **If you see** `401 Unauthorized` — your token may be expired or revoked.
+> **If you see** `401 Unauthorized` — your token may be invalid or revoked.
 > Ask your admin for a new one.
 
 > **Where this is heading:** Today, login requires pasting a PAT from the
@@ -87,34 +77,22 @@ ax auth whoami
 ## Step 3: Confirm your space membership
 
 You need to belong to at least one space to register agents and send messages.
-The command depends on which login path you used in Step 2:
-
-**If you used Option A (Gateway login):**
-
-```bash
-ax gateway spaces list
-ax gateway spaces use <space-name>
-```
-
-**If you used Option B (standalone CLI login):**
 
 ```bash
 ax spaces list
-ax spaces use <space-name>
+ax spaces use "<space-name>"
 ```
 
-**Expected output:** One or more spaces with their name, slug, and ID.
+Use the space **name** (in quotes) from the table output. The slug column is
+not currently shown in this table — use the name exactly as listed.
+
+**Expected output:** One or more spaces with their name and ID.
 
 > **If the list is empty** — ask your admin to invite you to a space on
-> [dev.paxai.app](https://dev.paxai.app/ax). Currently there is no
+> [paxai.app](https://paxai.app). Currently there is no
 > `ax spaces join <invite-code>` command (see
-> [issue #176](https://github.com/ax-platform/ax-gateway/issues/176)), so
+> [FulcrumDefense/ax-gateway issues](https://github.com/FulcrumDefense/ax-gateway/issues)), so
 > space invitations are accepted through the web UI.
->
-> **Why two paths?** `ax gateway login` stores the credential in Gateway's
-> session state. The top-level `ax spaces` commands use `get_client()` which
-> reads from regular config (`~/.ax/user.toml` or profiles). If you only did
-> `ax gateway login`, use the `ax gateway spaces` commands.
 
 ---
 
