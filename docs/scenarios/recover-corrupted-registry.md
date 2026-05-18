@@ -18,13 +18,15 @@ inconsistent.
 ax gateway stop
 ```
 
-If Gateway won't stop cleanly:
+If Gateway won't stop cleanly, try a force stop:
 
 ```bash
-# Find the PID
-cat ~/.ax/gateway/gateway.pid
+ax gateway stop --force
+```
 
-# Kill it
+If that still fails, kill the process manually:
+
+```bash
 kill $(cat ~/.ax/gateway/gateway.pid)
 ```
 

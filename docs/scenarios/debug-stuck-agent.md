@@ -14,7 +14,7 @@ Diagnose why an agent is registered but not processing messages.
 ### 1. Check agent state
 
 ```bash
-ax gateway agents show dev-sentinel --json
+ax gateway agents show dev-sentinel
 ```
 
 Look at three fields:
@@ -35,7 +35,7 @@ ax gateway agents start dev-sentinel
 ### 2. Check Gateway status
 
 ```bash
-ax gateway status --json
+ax gateway status
 ```
 
 Verify Gateway itself is running and healthy. Check `summary.managed_agents`,
@@ -43,10 +43,10 @@ Verify Gateway itself is running and healthy. Check `summary.managed_agents`,
 
 ### 3. Check the reconcile loop
 
-The reconcile loop runs every ~10 seconds. If the agent's `effective_state`
+The reconcile loop runs every ~1 second. If the agent's `effective_state`
 doesn't match `desired_state`, the loop should fix it automatically.
 
-Wait 30 seconds and re-check:
+Wait a few seconds and re-check:
 
 ```bash
 ax gateway agents show dev-sentinel

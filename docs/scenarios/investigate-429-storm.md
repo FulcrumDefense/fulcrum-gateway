@@ -12,10 +12,13 @@ aX platform API.
 
 ## Steps
 
-### 1. Confirm the 429 errors
+### 1. Check activity log for 429 events
+
+Most 429 responses surface as backoff events in the activity log, not in
+`gateway.log`:
 
 ```bash
-grep -c "429" ~/.ax/gateway/gateway.log
+grep -i "429\|backoff\|rate.limit" ~/.ax/gateway/activity.jsonl | tail -20
 ```
 
 If the count is high (dozens in a short window), you have a rate-limiting storm.
@@ -23,21 +26,20 @@ If the count is high (dozens in a short window), you have a rate-limiting storm.
 ### 2. Identify which agents are triggering 429s
 
 ```bash
-grep "429" ~/.ax/gateway/gateway.log | tail -20
+grep -i "429\|backoff" ~/.ax/gateway/activity.jsonl | \
+  grep "$(date +%Y-%m-%d)" | tail -20
 ```
 
-Look for the agent name or endpoint in each log line. Common culprits:
+Look for the agent name in each event. Common culprits:
 
 - Agents polling `list_messages` too frequently
-- The reconcile loop calling `list_spaces` for many agents in rapid succession
 - Multiple agents starting simultaneously, each calling `whoami` + `list_spaces`
+- Hermes sentinel runtimes retrying on transient errors
 
-### 3. Check the activity log for volume
+### 3. Check overall activity volume
 
 ```bash
-cat ~/.ax/gateway/activity.jsonl | \
-  grep "$(date +%Y-%m-%d)" | \
-  wc -l
+grep "$(date +%Y-%m-%d)" ~/.ax/gateway/activity.jsonl | wc -l
 ```
 
 Compare total activity today vs. a normal day. A spike often correlates with
@@ -45,15 +47,15 @@ an agent restart cascade.
 
 ### 4. Check backoff behavior
 
-Gateway should back off automatically on 429 responses. Look for backoff
-log lines:
+Gateway should back off automatically on 429 responses. Backoff events appear
+in the activity log:
 
 ```bash
-grep -i "backoff\|retry\|rate.limit" ~/.ax/gateway/gateway.log | tail -10
+grep -i "backoff\|retry" ~/.ax/gateway/activity.jsonl | tail -10
 ```
 
 If you see no backoff messages, the retry logic may not be handling 429s
-correctly — file a bug.
+correctly — file a bug (see also issue #27).
 
 ### 5. Reduce load
 
@@ -88,17 +90,17 @@ ax gateway status
 ax gateway agents show dev-sentinel
 ```
 
-Check that agents are healthy and no new 429 errors appear in the log:
+Check that agents are healthy and no new 429 events appear:
 
 ```bash
-tail -f ~/.ax/gateway/gateway.log | grep "429"
+tail -f ~/.ax/gateway/activity.jsonl | grep -i "429\|backoff"
 ```
 
-Wait 60 seconds. If no new 429 lines appear, the storm has passed.
+Wait 60 seconds. If no new lines appear, the storm has passed.
 
 ## Verify
 
-- No new 429 errors in `gateway.log` for at least 60 seconds
+- No new 429 events in `activity.jsonl` for at least 60 seconds
 - All critical agents show `effective_state: running`
 - Messages are being delivered normally
 
@@ -108,7 +110,7 @@ Wait 60 seconds. If no new 429 lines appear, the storm has passed.
 | --- | --- | --- |
 | 429s continue after reducing agents | Platform-wide rate limit, not per-agent | Wait for the rate limit window to expire (usually 1-5 minutes) |
 | Agent enters error state after 429 storm | Too many consecutive failures triggered a health check failure | Restart the agent after the storm passes |
-| Reconcile loop itself triggers 429s | Loop calls upstream API for each agent every ~10 seconds | Reduce registered agent count, or wait for batch API support |
+| Reconcile loop itself triggers 429s | Loop calls upstream API for each agent every ~1 second | Reduce registered agent count, or wait for batch API support |
 
 ## Learning goal
 
