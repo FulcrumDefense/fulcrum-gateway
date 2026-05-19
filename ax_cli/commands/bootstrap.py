@@ -216,6 +216,10 @@ def _create_agent_in_space(client, *, name: str, space_id: str, description: str
                 pass
             else:
                 raise
+        except Exception:
+            # Network timeout, connection refused, DNS failure — fall through
+            # to the legacy POST path, same as _mint_agent_pat.
+            pass
 
     body: dict = {"name": name}
     if description is not None:
