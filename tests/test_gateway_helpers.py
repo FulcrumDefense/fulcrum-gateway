@@ -1992,6 +1992,71 @@ class TestLookupSpaceInCache:
         monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
         assert lookup_space_in_cache("") is None
 
+    def test_ambiguous_name_returns_none(self, monkeypatch, tmp_path):
+        """Regression for #47: two cached rows with the same name must not
+        silently resolve to the first match. Returning None forces the caller
+        to live-fetch and hit the resolver's ambiguity branch."""
+        from ax_cli.gateway import lookup_space_in_cache, save_space_cache
+
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+        save_space_cache(
+            [
+                {"id": "11111111-1111-1111-1111-111111111111", "name": "Demo Team", "slug": "demo-team-1"},
+                {"id": "22222222-2222-2222-2222-222222222222", "name": "Demo Team", "slug": "demo-team-2"},
+            ]
+        )
+        assert lookup_space_in_cache("Demo Team") is None
+
+    def test_ambiguous_slug_collision_returns_none(self, monkeypatch, tmp_path):
+        """Same guard for slug collisions (unlikely in practice since the
+        backend disambiguates slugs, but the function should still be safe
+        if upstream ever returns duplicates)."""
+        from ax_cli.gateway import lookup_space_in_cache, save_space_cache
+
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+        save_space_cache(
+            [
+                {"id": "11111111-1111-1111-1111-111111111111", "name": "Alpha", "slug": "dup"},
+                {"id": "22222222-2222-2222-2222-222222222222", "name": "Beta", "slug": "dup"},
+            ]
+        )
+        assert lookup_space_in_cache("dup") is None
+
+    def test_unique_name_among_many_still_resolves(self, monkeypatch, tmp_path):
+        """An ambiguity-aware lookup must still resolve names that are
+        unique within the cache, even when other rows exist."""
+        from ax_cli.gateway import lookup_space_in_cache, save_space_cache
+
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+        save_space_cache(
+            [
+                {"id": "11111111-1111-1111-1111-111111111111", "name": "Demo Team", "slug": "demo-team-1"},
+                {"id": "22222222-2222-2222-2222-222222222222", "name": "Demo Team", "slug": "demo-team-2"},
+                {"id": "33333333-3333-3333-3333-333333333333", "name": "ax-gateway", "slug": "ax-gateway"},
+            ]
+        )
+        result = lookup_space_in_cache("ax-gateway")
+        assert result is not None
+        assert result["id"] == "33333333-3333-3333-3333-333333333333"
+
+    def test_uuid_still_resolves_when_name_is_ambiguous(self, monkeypatch, tmp_path):
+        """A UUID is unambiguous by construction. Even if the cache contains
+        multiple rows sharing the same name, looking up by UUID must still
+        short-circuit to the exact row."""
+        from ax_cli.gateway import lookup_space_in_cache, save_space_cache
+
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+        target_uuid = "22222222-2222-2222-2222-222222222222"
+        save_space_cache(
+            [
+                {"id": "11111111-1111-1111-1111-111111111111", "name": "Demo Team", "slug": "demo-team-1"},
+                {"id": target_uuid, "name": "Demo Team", "slug": "demo-team-2"},
+            ]
+        )
+        result = lookup_space_in_cache(target_uuid)
+        assert result is not None
+        assert result["id"] == target_uuid
+
 
 class TestPendingMessages:
     """load_agent_pending_messages / save_agent_pending_messages."""
