@@ -1,3 +1,8 @@
 """aX Platform CLI."""
 
-__version__ = "0.3.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("axctl")
+except PackageNotFoundError:
+    __version__ = "unknown"

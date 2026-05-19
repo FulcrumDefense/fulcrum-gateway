@@ -5077,7 +5077,7 @@ def _render_gateway_ui_page(*, refresh_ms: int) -> str:
     <section class="panel">
       <div class="panel-body footer-note">
         <span>Local status API: <code>/api/status</code> and <code>/api/agents/&lt;name&gt;</code></span>
-        <span>Setup skill: <code>skills/gateway-agent-setup/SKILL.md</code> · Terminal parity: <code>uv run ax gateway watch</code></span>
+        <span>Setup skill: <code>skills/gateway-agent-setup/SKILL.md</code> · Terminal parity: <code>uv run ax gateway watch</code> · axctl <code>__VERSION__</code></span>
       </div>
     </section>
   </main>
@@ -5720,7 +5720,9 @@ def _render_gateway_ui_page(*, refresh_ms: int) -> str:
 </body>
 </html>
 """
-    return template.replace("__REFRESH_MS__", str(refresh_ms))
+    from ax_cli import __version__
+
+    return template.replace("__REFRESH_MS__", str(refresh_ms)).replace("__VERSION__", __version__)
 
 
 _DEMO_HTML_PATH = Path(__file__).resolve().parent.parent / "static" / "demo.html"
@@ -5750,8 +5752,13 @@ _GATEWAY_FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4
 
 
 def _render_gateway_demo_page(*, refresh_ms: int) -> str:
+    from ax_cli import __version__
+
     body = _DEMO_HTML_PATH.read_text(encoding="utf-8")
-    inject = f"<script>window.__GATEWAY_DEMO_REFRESH_MS__ = {int(refresh_ms)};</script></head>"
+    inject = (
+        f"<script>window.__GATEWAY_DEMO_REFRESH_MS__ = {int(refresh_ms)};"
+        f"window.__AXCTL_VERSION__ = {__version__!r};</script></head>"
+    )
     return body.replace("</head>", inject, 1)
 
 

@@ -63,7 +63,27 @@ from .commands import (  # noqa: E402
     watch,
 )
 
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from ax_cli import __version__
+
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 app = typer.Typer(name="ax", help="aX Platform CLI", no_args_is_help=True)
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False, "--version", "-V", callback=_version_callback, is_eager=True, help="Show version and exit"
+    ),
+) -> None:
+    pass
+
+
 app.add_typer(auth.app, name="auth")
 app.add_typer(keys.app, name="keys")
 app.add_typer(credentials.app, name="credentials")
