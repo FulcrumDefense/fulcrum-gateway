@@ -2996,14 +2996,19 @@ def upsert_space_cache_entry(space_id: str, *, name: str | None = None, slug: st
 def lookup_space_in_cache(ref: str) -> dict[str, Any] | None:
     """Resolve a space ref (UUID, slug, name) against the local cache.
 
-    Returns the cached row or None. Keeps slug switches out of the 429 path:
-    a slug we have ever resolved before stays resolvable from cache without
-    hitting upstream.
+    Returns the cached row when the ref unambiguously matches exactly one
+    cached space, else None. UUID matches always short-circuit (a UUID
+    cannot collide). Slug and name matches are collected across the whole
+    cache: if more than one row matches, we return None so the caller
+    falls through to the live-fetch path, where the resolver's ambiguity
+    branch in `_resolve_space_ref` produces the correct fail-closed error
+    instead of silently selecting the first match (issue #47).
     """
     needle = str(ref or "").strip()
     if not needle:
         return None
     norm = needle.lower()
+    matches: list[dict[str, Any]] = []
     for row in load_space_cache():
         sid = str(row.get("id") or row.get("space_id") or "").strip()
         if not sid:
@@ -3012,10 +3017,10 @@ def lookup_space_in_cache(ref: str) -> dict[str, Any] | None:
             return row
         slug = str(row.get("slug") or "").strip().lower()
         name = str(row.get("name") or "").strip().lower()
-        if slug and slug == norm:
-            return row
-        if name and name == norm:
-            return row
+        if (slug and slug == norm) or (name and name == norm):
+            matches.append(row)
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
