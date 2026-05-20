@@ -119,6 +119,7 @@ runtime_app = typer.Typer(
 local_app = typer.Typer(name="local", help="Connect local pass-through agents to Gateway", no_args_is_help=True)
 connectors_app = typer.Typer(name="connectors", help="Manage outbound tool connectors", no_args_is_help=True)
 connectors_auth_app = typer.Typer(name="auth", help="Manage connector credentials", no_args_is_help=True)
+connectors_tools_app = typer.Typer(name="tools", help="Discover and search connector tools", no_args_is_help=True)
 _ATTACHED_SESSION_PROCESSES: list[subprocess.Popen[bytes]] = []
 app.add_typer(agents_app, name="agents")
 app.add_typer(spaces_app, name="spaces")
@@ -127,6 +128,7 @@ app.add_typer(runtime_app, name="runtime")
 app.add_typer(local_app, name="local")
 app.add_typer(connectors_app, name="connectors")
 connectors_app.add_typer(connectors_auth_app, name="auth")
+connectors_app.add_typer(connectors_tools_app, name="tools")
 
 _STATE_STYLES = {
     "running": "green",
@@ -2789,7 +2791,7 @@ def _status_payload(*, activity_limit: int = 10, include_hidden: bool = False) -
         if space_counts:
             fallback_space_id = max(space_counts.items(), key=lambda item: item[1])[0]
 
-    from ..connectors.storage import connectors_registry_path
+    from ..connectors.paths import connectors_registry_path
     from ..connectors.storage import list_connectors as _list_connectors
 
     _connectors_count = 0
@@ -9292,6 +9294,7 @@ def connectors_call(
     from ..connectors import (
         ConnectorAuthError,
         ConnectorNotFoundError,
+        ConnectorPolicyError,
         ConnectorProviderError,
         execute_tool,
         find_connector,
@@ -9332,6 +9335,9 @@ def connectors_call(
         return
     try:
         result = execute_tool(row, tool, args, auth_env)
+    except ConnectorPolicyError as e:
+        err_console.print(f"[red]Blocked by policy:[/red] {e}")
+        raise typer.Exit(1)
     except ConnectorProviderError as e:
         err_console.print(f"[red]Provider error:[/red] {e}")
         raise typer.Exit(1)
@@ -9352,8 +9358,11 @@ def connectors_providers(as_json: bool = JSON_OPTION):
         print_json(providers)
         return
     for p in providers:
+        caps = ", ".join(p.get("capabilities", []))
         err_console.print(f"[bold]{p['name']}[/bold] — {p['description']}")
-        err_console.print(f"  Required auth: {', '.join(p['required_auth_keys'])}")
+        if caps:
+            err_console.print(f"  Capabilities: {caps}")
+        err_console.print(f"  Required auth: {', '.join(p['required_auth_keys']) or '(none)'}")
         if p.get("optional_auth_keys"):
             err_console.print(f"  Optional auth: {', '.join(p['optional_auth_keys'])}")
 
@@ -9607,3 +9616,137 @@ def connectors_auth_clear(
         err_console.print(f"[green]Auth removed for {row.name}[/green]")
     else:
         err_console.print(f"[yellow]No auth file found for {row.name}[/yellow]")
+
+
+# ── connectors tools ─────────────────────────────────────────────────────────
+
+
+@connectors_tools_app.command("list")
+def connectors_tools_list(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    toolkit: str = typer.Option(None, "--toolkit", help="Filter by toolkit/app name"),
+    limit: int = typer.Option(0, "--limit", help="Cap results (0 = use policy limit)"),
+    as_json: bool = JSON_OPTION,
+):
+    """List tools available through a connector (filtered by policy)."""
+    from ..connectors import (
+        ConnectorAuthError,
+        ConnectorNotFoundError,
+        ConnectorProviderError,
+        find_connector,
+        list_tools,
+        read_auth,
+    )
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    if not row.enabled:
+        err_console.print(f"[red]Connector {row.name!r} is disabled[/red]")
+        raise typer.Exit(1)
+    try:
+        auth_env = read_auth(row.id, row.name) if row.auth_ref else {}
+    except ConnectorAuthError as e:
+        err_console.print(f"[red]Auth error:[/red] {e}")
+        raise typer.Exit(1)
+    try:
+        result = list_tools(row, auth_env)
+    except ConnectorProviderError as e:
+        err_console.print(f"[red]Provider error:[/red] {e}")
+        raise typer.Exit(1)
+
+    items = result.get("items", [])
+    if toolkit:
+        toolkit_lower = toolkit.lower()
+        items = [
+            i for i in items
+            if toolkit_lower in str(i.get("appName", "")).lower()
+            or toolkit_lower in str(i.get("toolkit", "")).lower()
+        ]
+    if limit and limit > 0:
+        items = items[:limit]
+
+    if as_json:
+        print_json({"connector": row.name, "provider": row.provider, "tools": items, "count": len(items)})
+        return
+    if not items:
+        err_console.print(f"No tools found for connector {row.name!r}.")
+        return
+    err_console.print(f"[bold]{row.name}[/bold] ({row.provider}) — {len(items)} tools:")
+    print_table(
+        ["Name", "Display Name", "Description"],
+        [
+            {
+                "name": str(i.get("name") or i.get("enum") or ""),
+                "displayName": str(i.get("displayName") or ""),
+                "description": str(i.get("description") or "")[:80],
+            }
+            for i in items
+        ],
+        keys=["name", "displayName", "description"],
+    )
+
+
+@connectors_tools_app.command("search")
+def connectors_tools_search(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    use_case: str = typer.Option(..., "--use-case", "-u", help="Natural-language use case query"),
+    mode: str = typer.Option("auto", "--mode", "-m", help="Search mode: auto, intent, or catalog"),
+    limit: int = typer.Option(10, "--limit", help="Max results"),
+    as_json: bool = JSON_OPTION,
+):
+    """Search for tools matching a use case (intent or catalog mode)."""
+    from ..connectors import (
+        ConnectorAuthError,
+        ConnectorNotFoundError,
+        ConnectorProviderError,
+        find_connector,
+        read_auth,
+        search_tools,
+    )
+
+    if mode not in ("auto", "intent", "catalog"):
+        err_console.print(f"[red]Invalid mode:[/red] {mode!r}. Use auto, intent, or catalog.")
+        raise typer.Exit(1)
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    if not row.enabled:
+        err_console.print(f"[red]Connector {row.name!r} is disabled[/red]")
+        raise typer.Exit(1)
+    try:
+        auth_env = read_auth(row.id, row.name) if row.auth_ref else {}
+    except ConnectorAuthError as e:
+        err_console.print(f"[red]Auth error:[/red] {e}")
+        raise typer.Exit(1)
+    try:
+        result = search_tools(row, use_case, auth_env, limit=limit, mode=mode)
+    except ConnectorProviderError as e:
+        err_console.print(f"[red]Provider error:[/red] {e}")
+        raise typer.Exit(1)
+
+    items = result.get("items", [])
+    if as_json:
+        print_json({"connector": row.name, "query": use_case, "mode": mode, "tools": items, "count": len(items)})
+        return
+    if not items:
+        err_console.print(f"No tools found for query {use_case!r}.")
+        return
+    err_console.print(f"[bold]{row.name}[/bold] search ({mode}) — {len(items)} results:")
+    print_table(
+        ["Name", "Display Name", "Description"],
+        [
+            {
+                "name": str(i.get("name") or i.get("enum") or ""),
+                "displayName": str(i.get("displayName") or ""),
+                "description": str(i.get("description") or "")[:80],
+            }
+            for i in items
+        ],
+        keys=["name", "displayName", "description"],
+    )

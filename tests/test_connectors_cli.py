@@ -18,7 +18,7 @@ runner = CliRunner()
 @pytest.fixture()
 def tmp_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        "ax_cli.connectors.storage._connectors_path",
+        "ax_cli.connectors.paths.connectors_registry_path",
         lambda: tmp_path / "connectors.json",
     )
     auth_dir = tmp_path / "connectors" / "auth"
@@ -27,7 +27,7 @@ def tmp_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         auth_dir.mkdir(parents=True, exist_ok=True)
         return auth_dir
 
-    monkeypatch.setattr("ax_cli.connectors.auth._auth_dir", _fake_auth_dir)
+    monkeypatch.setattr("ax_cli.connectors.paths.auth_dir", _fake_auth_dir)
     return tmp_path
 
 
