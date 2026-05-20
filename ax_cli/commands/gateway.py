@@ -9073,7 +9073,9 @@ def connectors_list(as_json: bool = JSON_OPTION):
         print_json([r.to_dict() for r in rows])
         return
     if not rows:
-        err_console.print("No connectors registered. Run: ax gateway connectors add <name> --provider composio --managed-auth")
+        err_console.print(
+            "No connectors registered. Run: ax gateway connectors add <name> --provider composio --managed-auth"
+        )
         return
     print_table(
         ["Name", "Provider", "Enabled", "Auth", "ID"],
@@ -9273,7 +9275,9 @@ def connectors_auth_write(
         err_console.print(f"[red]Connector not found:[/red] {ref}")
         raise typer.Exit(1)
     if not row.auth_ref:
-        err_console.print(f"[red]Connector {row.name!r} does not use managed auth.[/red] Re-create with --managed-auth.")
+        err_console.print(
+            f"[red]Connector {row.name!r} does not use managed auth.[/red] Re-create with --managed-auth."
+        )
         raise typer.Exit(1)
     parsed: dict[str, str] = {}
     for kv in kvs:

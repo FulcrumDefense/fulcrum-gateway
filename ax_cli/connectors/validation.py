@@ -20,13 +20,9 @@ def validate_new_connector(row: ConnectorRow) -> None:
         from .providers.registry import list_providers
 
         available = ", ".join(p["name"] for p in list_providers())
-        raise ConnectorError(
-            f"Unknown provider {row.provider!r}. Available: {available}"
-        )
+        raise ConnectorError(f"Unknown provider {row.provider!r}. Available: {available}")
 
     name_lower = row.name.lower()
     for existing in list_connectors():
         if existing.name.lower() == name_lower:
-            raise ConnectorError(
-                f"Connector name {row.name!r} already exists (id={existing.id})"
-            )
+            raise ConnectorError(f"Connector name {row.name!r} already exists (id={existing.id})")

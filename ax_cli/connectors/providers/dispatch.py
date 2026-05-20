@@ -17,11 +17,13 @@ def execute_tool(
 ) -> dict[str, Any]:
     if connector.provider == "composio":
         return composio_adapter.execute_tool(
-            tool_slug, args, auth_env, connector.config, connector.name,
+            tool_slug,
+            args,
+            auth_env,
+            connector.config,
+            connector.name,
         )
-    raise ConnectorProviderError(
-        connector.provider, f"No adapter for provider {connector.provider!r}"
-    )
+    raise ConnectorProviderError(connector.provider, f"No adapter for provider {connector.provider!r}")
 
 
 def search_tools(
@@ -33,8 +35,10 @@ def search_tools(
 ) -> dict[str, Any]:
     if connector.provider == "composio":
         return composio_adapter.search_tools(
-            query, auth_env, connector.config, connector.name, limit=limit,
+            query,
+            auth_env,
+            connector.config,
+            connector.name,
+            limit=limit,
         )
-    raise ConnectorProviderError(
-        connector.provider, f"No search adapter for provider {connector.provider!r}"
-    )
+    raise ConnectorProviderError(connector.provider, f"No search adapter for provider {connector.provider!r}")

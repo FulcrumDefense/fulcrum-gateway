@@ -108,10 +108,7 @@ def execute_tool(
     if connected_account_id:
         body["connectedAccountId"] = connected_account_id
     else:
-        entity_id = (
-            auth_env.get("COMPOSIO_ENTITY_ID", "").strip()
-            or str(config.get("entity_id") or "default").strip()
-        )
+        entity_id = auth_env.get("COMPOSIO_ENTITY_ID", "").strip() or str(config.get("entity_id") or "default").strip()
         app_name = str(config.get("app_name") or "").strip()
         body["entityId"] = entity_id
         if app_name:
