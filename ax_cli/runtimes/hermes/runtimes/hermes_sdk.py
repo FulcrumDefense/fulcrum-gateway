@@ -292,6 +292,154 @@ def _secure_hermes_tools(workdir: str):
     _wrap("execute_code", _check_code)
 
 
+def _register_connector_tools(workdir: str) -> None:
+    """Register gateway connector tools into the hermes tool registry."""
+    from tools.registry import registry
+
+    _SCHEMAS = {
+        "connector_search": {
+            "name": "connector_search",
+            "description": (
+                "Search for available tools on a gateway connector "
+                "(e.g. Gmail, Slack, GitHub). Describe what you want in plain English."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connector": {"type": "string", "description": "Connector reference name"},
+                    "query": {"type": "string", "description": "Natural-language description of the tool you need (e.g. 'send email')"},
+                    "app": {"type": "string", "description": "Filter results to a specific app (e.g. 'gmail', 'slack')"},
+                    "limit": {"type": "integer", "description": "Max results to return", "default": 5},
+                },
+                "required": ["connector", "query"],
+            },
+        },
+        "connector_call": {
+            "name": "connector_call",
+            "description": "Execute a tool on a gateway connector. Use connector_search first to find the tool slug.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connector": {"type": "string", "description": "Connector reference name"},
+                    "tool": {"type": "string", "description": "Tool slug from connector_search (e.g. 'GMAIL_SEND_EMAIL')"},
+                    "args": {"type": "object", "description": "Tool-specific arguments as key-value pairs"},
+                },
+                "required": ["connector", "tool"],
+            },
+        },
+        "connector_apps": {
+            "name": "connector_apps",
+            "description": "List connected apps on a gateway connector. Shows which services (Gmail, Slack, etc.) are available.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connector": {"type": "string", "description": "Connector reference name"},
+                },
+                "required": ["connector"],
+            },
+        },
+    }
+
+    # The sentinel sets AX_CONFIG_DIR to the agent's workspace dir, but
+    # connectors.json lives under the gateway's global config (~/.ax/gateway).
+    # Save the real home so handlers can temporarily override.
+    _global_ax_dir = str(Path.home() / ".ax")
+
+    def _do_connector_call(tool_name, args):
+        from ax_cli.connectors import ConnectorNotFoundError, find_connector, read_auth
+
+        ref = args.get("connector", "")
+        try:
+            row = find_connector(ref)
+        except ConnectorNotFoundError:
+            return json.dumps({"error": f"Connector not found: {ref}"})
+        try:
+            auth_env = read_auth(row.id, row.name) if row.auth_ref else {}
+        except Exception as e:
+            return json.dumps({"error": f"Auth error: {e}"})
+
+        if tool_name == "connector_apps":
+            from ax_cli.connectors import list_apps
+            try:
+                items = list_apps(row, auth_env)
+            except Exception as e:
+                return json.dumps({"error": f"Error listing apps: {e}"})
+            if not items:
+                return "No connected apps found"
+            return "\n".join(
+                f"{a.get('appName', '?')}  status={a.get('status', '?')}" for a in items
+            )
+
+        if tool_name == "connector_search":
+            from ax_cli.connectors import search_tools
+            query = args.get("query", "")
+            app = args.get("app")
+            limit = args.get("limit", 5)
+            try:
+                result = search_tools(row, query, auth_env, apps=app, limit=limit)
+            except Exception as e:
+                return json.dumps({"error": f"Search error: {e}"})
+            items = result.get("items", [])
+            if not items:
+                return f"No tools found for: {query}"
+            lines = []
+            for item in items:
+                slug = item.get("enum", item.get("name", "?"))
+                display = item.get("displayName") or item.get("display_name") or ""
+                app_id = item.get("appId", "")
+                lines.append(f"{slug}  app={app_id}\n  {display}")
+            return "\n".join(lines)
+
+        if tool_name == "connector_call":
+            from ax_cli.connectors import execute_tool as connector_execute
+            tool_slug = args.get("tool", "")
+            tool_args = args.get("args", {})
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = json.loads(tool_args)
+                except json.JSONDecodeError:
+                    return json.dumps({"error": f"Invalid JSON in args: {tool_args}"})
+            try:
+                result = connector_execute(row, tool_slug, tool_args, auth_env)
+            except Exception as e:
+                return json.dumps({"error": f"Connector error: {e}"})
+            output = json.dumps(result, indent=2, default=str)
+            if len(output) > 20000:
+                output = output[:20000] + "\n...(truncated)..."
+            return output
+
+        return json.dumps({"error": f"Unknown connector tool: {tool_name}"})
+
+    def _make_handler(tool_name):
+        def handler(args, **kwargs):
+            saved = os.environ.get("AX_CONFIG_DIR")
+            os.environ["AX_CONFIG_DIR"] = _global_ax_dir
+            try:
+                return _do_connector_call(tool_name, args)
+            finally:
+                if saved is not None:
+                    os.environ["AX_CONFIG_DIR"] = saved
+                else:
+                    os.environ.pop("AX_CONFIG_DIR", None)
+        return handler
+
+    registered = 0
+    for name, schema in _SCHEMAS.items():
+        if registry.get_entry(name) is not None:
+            continue
+        registry.register(
+            name=name,
+            toolset="connectors",
+            schema=schema,
+            handler=_make_handler(name),
+            description=schema["description"],
+        )
+        registered += 1
+
+    if registered:
+        log.info("hermes_sdk: registered %d connector tools", registered)
+
+
 @register("hermes_sdk")
 class HermesSDKRuntime(BaseRuntime):
     """Runs hermes-agent's AIAgent with full agentic loop.
@@ -386,6 +534,13 @@ class HermesSDKRuntime(BaseRuntime):
                 "cronjob", "rl_training", "homeassistant",
             ])
             max_iters = int(os.environ.get("HERMES_MAX_ITERATIONS", "60"))
+
+        # ── Register connector tools into hermes registry ──
+        # Must happen BEFORE AIAgent() which snapshots tool definitions.
+        try:
+            _register_connector_tools(workdir)
+        except Exception as e:
+            log.warning("hermes_sdk: connector tool registration failed: %s", e)
 
         # ── Build the agent ──
         try:

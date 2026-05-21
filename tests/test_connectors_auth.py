@@ -99,12 +99,18 @@ class TestAuthLifecycle:
         path = write_auth("conn-id-3", "test", {"KEY": "val"})
         assert oct(path.stat().st_mode & 0o777) == "0o600"
 
-    def test_write_overwrites_existing(self, tmp_gateway: Path):
-        write_auth("conn-id-4", "test", {"OLD": "val"})
-        write_auth("conn-id-4", "test", {"NEW": "val"})
+    def test_write_merges_existing(self, tmp_gateway: Path):
+        write_auth("conn-id-4", "test", {"OLD": "val1"})
+        write_auth("conn-id-4", "test", {"NEW": "val2"})
         result = read_auth("conn-id-4", "test")
-        assert "OLD" not in result
-        assert result["NEW"] == "val"
+        assert result["OLD"] == "val1"
+        assert result["NEW"] == "val2"
+
+    def test_write_overwrites_same_key(self, tmp_gateway: Path):
+        write_auth("conn-id-4b", "test", {"KEY": "original"})
+        write_auth("conn-id-4b", "test", {"KEY": "updated"})
+        result = read_auth("conn-id-4b", "test")
+        assert result["KEY"] == "updated"
 
     def test_write_empty_raises(self, tmp_gateway: Path):
         with pytest.raises(ConnectorAuthError, match="No key-value pairs"):

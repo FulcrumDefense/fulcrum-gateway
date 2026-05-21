@@ -12,7 +12,7 @@ from .errors import (
     ConnectorRateLimitError,
     ConnectorTransientError,
 )
-from .providers.dispatch import execute_tool, search_tools
+from .providers.dispatch import execute_tool, initiate_connection, list_apps, search_tools
 from .storage import (
     add_connector,
     connectors_registry_path,
@@ -40,7 +40,9 @@ __all__ = [
     "connectors_registry_path",
     "execute_tool",
     "find_connector",
+    "initiate_connection",
     "list_connectors",
+    "list_apps",
     "load_connectors_registry",
     "read_auth",
     "remove_connector",

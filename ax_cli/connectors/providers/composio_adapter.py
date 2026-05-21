@@ -78,11 +78,14 @@ def search_tools(
     config: dict[str, Any],
     connector_name: str,
     *,
+    apps: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
     base = _base_url(config)
     key = _api_key(auth_env, connector_name)
     params: dict[str, Any] = {"useCase": query, "limit": limit}
+    if apps:
+        params["apps"] = apps
 
     try:
         resp = httpx.get(
@@ -97,6 +100,117 @@ def search_tools(
         raise ConnectorProviderError("composio", f"HTTP error searching tools: {e!r}") from e
 
     _handle_error_response(resp, "Search tools")
+    return resp.json()
+
+
+def list_apps(
+    auth_env: dict[str, str],
+    config: dict[str, Any],
+    connector_name: str,
+) -> list[dict[str, Any]]:
+    key = _api_key(auth_env, connector_name)
+    try:
+        resp = httpx.get(
+            "https://backend.composio.dev/api/v1/connectedAccounts",
+            params={"showActiveOnly": "true"},
+            headers=_headers(key),
+            timeout=httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=CONNECT_TIMEOUT),
+        )
+    except httpx.HTTPError as e:
+        raise ConnectorProviderError("composio", f"HTTP error listing apps: {e!r}") from e
+    _handle_error_response(resp, "List connected apps")
+    return resp.json().get("items", [])
+
+
+def initiate_connection(
+    app_name: str,
+    entity_id: str,
+    auth_env: dict[str, str],
+    config: dict[str, Any],
+    connector_name: str,
+) -> dict[str, Any]:
+    key = _api_key(auth_env, connector_name)
+    hdrs = _headers(key)
+    timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=CONNECT_TIMEOUT)
+
+    # Look up the app to get its supported auth scheme
+    app_resp = httpx.get(
+        f"https://backend.composio.dev/api/v1/apps/{app_name}",
+        headers=hdrs, timeout=timeout,
+    )
+    _handle_error_response(app_resp, f"Look up app {app_name}")
+    app_data = app_resp.json()
+    app_uuid = app_data.get("appId")
+    if not app_uuid:
+        raise ConnectorProviderError("composio", f"App {app_name!r} not found in Composio")
+
+    auth_schemes = app_data.get("auth_schemes", [])
+    auth_mode = auth_schemes[0].get("auth_mode", "OAUTH2") if auth_schemes else "OAUTH2"
+
+    # Find or create an integration for this app
+    integrations_resp = httpx.get(
+        "https://backend.composio.dev/api/v1/integrations",
+        params={"appName": app_name},
+        headers=hdrs, timeout=timeout,
+    )
+    _handle_error_response(integrations_resp, "List integrations")
+    items = integrations_resp.json().get("items", [])
+    if not items:
+        integration_body: dict[str, Any] = {
+            "appId": app_uuid,
+            "name": f"ax-{app_name}",
+            "authScheme": auth_mode,
+        }
+        if auth_mode == "OAUTH2":
+            integration_body["useComposioAuth"] = True
+        create_resp = httpx.post(
+            "https://backend.composio.dev/api/v1/integrations",
+            json=integration_body,
+            headers=hdrs, timeout=timeout,
+        )
+        _handle_error_response(create_resp, f"Create integration for {app_name}")
+        integration_id = create_resp.json().get("id")
+        if not integration_id:
+            raise ConnectorProviderError("composio", f"Failed to create integration for {app_name!r}")
+    else:
+        integration_id = items[0]["id"]
+
+    # Build the connected-account payload
+    account_body: dict[str, Any] = {
+        "integrationId": integration_id,
+        "entityId": entity_id,
+        "data": {},
+    }
+    if auth_mode == "API_KEY":
+        # Prompt-style: look for <APP>_API_KEY in the connector's auth env
+        app_key_var = f"{app_name.upper()}_API_KEY"
+        app_key = auth_env.get(app_key_var, "").strip()
+        if not app_key:
+            raise ConnectorProviderError(
+                "composio",
+                f"{app_name!r} uses API-key auth. "
+                f"Set the key first:\n"
+                f"  ax gateway connectors auth write {connector_name} {app_key_var}=<your key>",
+            )
+        # Composio expects the key fields from the auth scheme
+        field_names = [
+            f.get("name") for f in auth_schemes[0].get("fields", [])
+            if f.get("name")
+        ] if auth_schemes else []
+        if field_names:
+            account_body["data"] = {field_names[0]: app_key}
+        else:
+            account_body["data"] = {"api_key": app_key}
+
+    try:
+        resp = httpx.post(
+            "https://backend.composio.dev/api/v1/connectedAccounts",
+            json=account_body,
+            headers=hdrs, timeout=timeout,
+        )
+    except httpx.HTTPError as e:
+        raise ConnectorProviderError("composio", f"HTTP error initiating connection: {e!r}") from e
+    _handle_error_response(resp, f"Initiate {app_name} connection")
     return resp.json()
 
 

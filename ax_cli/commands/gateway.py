@@ -9197,6 +9197,52 @@ def connectors_set(
     err_console.print(f"[green]Updated:[/green] {updated.name} config.{key} = {value}")
 
 
+@connectors_app.command("enable")
+def connectors_enable(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Enable a connector so agents can use it."""
+    from ..connectors import ConnectorNotFoundError, find_connector, update_connector
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    if row.enabled:
+        err_console.print(f"Connector {row.name!r} is already enabled.")
+        return
+    updated = update_connector(ref, {"enabled": True})
+    if as_json:
+        print_json(updated.to_dict())
+        return
+    err_console.print(f"[green]Enabled:[/green] {updated.name}")
+
+
+@connectors_app.command("disable")
+def connectors_disable(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Disable a connector (agents cannot use it until re-enabled)."""
+    from ..connectors import ConnectorNotFoundError, find_connector, update_connector
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    if not row.enabled:
+        err_console.print(f"Connector {row.name!r} is already disabled.")
+        return
+    updated = update_connector(ref, {"enabled": False})
+    if as_json:
+        print_json(updated.to_dict())
+        return
+    err_console.print(f"[yellow]Disabled:[/yellow] {updated.name}")
+
+
 @connectors_app.command("call")
 def connectors_call(
     ref: str = typer.Argument(..., help="Connector name or ID"),
@@ -9277,13 +9323,162 @@ def connectors_providers(as_json: bool = JSON_OPTION):
             err_console.print(f"  Optional auth: {', '.join(p['optional_auth_keys'])}")
 
 
+@connectors_app.command("apps")
+def connectors_apps(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    as_json: bool = JSON_OPTION,
+):
+    """List apps with active OAuth connections in the provider."""
+    from ..connectors import (
+        ConnectorAuthError,
+        ConnectorNotFoundError,
+        find_connector,
+        list_apps,
+        read_auth,
+    )
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    try:
+        auth_env = read_auth(row.id, row.name) if row.auth_ref else {}
+    except ConnectorAuthError as e:
+        err_console.print(f"[red]Auth error:[/red] {e}")
+        raise typer.Exit(1)
+    from ..connectors.errors import ConnectorProviderError
+
+    try:
+        items = list_apps(row, auth_env)
+    except ConnectorProviderError as e:
+        err_console.print(f"[red]Provider error:[/red] {e}")
+        raise typer.Exit(1)
+    if as_json:
+        print_json([{"app": a.get("appName"), "status": a.get("status"), "entity_id": a.get("clientUniqueUserId")} for a in items])
+        return
+    if not items:
+        err_console.print("No connected apps. Run: ax gateway connectors connect <ref> --app <app_name>")
+        return
+    for a in items:
+        err_console.print(f"  [bold]{a.get('appName', '?')}[/bold]  status={a.get('status', '?')}  entity={a.get('clientUniqueUserId', '?')}")
+
+
+@connectors_app.command("connect")
+def connectors_connect(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    app: str = typer.Option(..., "--app", "-a", help="App to connect (e.g. github, gmail, slack)"),
+    as_json: bool = JSON_OPTION,
+):
+    """Initiate an OAuth connection for an app via the provider. Prints a URL to complete auth in a browser."""
+    from ..connectors import (
+        ConnectorAuthError,
+        ConnectorNotFoundError,
+        find_connector,
+        initiate_connection,
+        read_auth,
+    )
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    try:
+        auth_env = read_auth(row.id, row.name) if row.auth_ref else {}
+    except ConnectorAuthError as e:
+        err_console.print(f"[red]Auth error:[/red] {e}")
+        raise typer.Exit(1)
+    entity_id = row.config.get("entity_id") or "default"
+    from ..connectors.errors import ConnectorProviderError
+
+    try:
+        result = initiate_connection(row, app, entity_id, auth_env)
+    except ConnectorProviderError as e:
+        err_console.print(f"[red]Provider error:[/red] {e}")
+        raise typer.Exit(1)
+    if as_json:
+        print_json(result)
+        return
+    status = result.get("connectionStatus", "?")
+    url = result.get("redirectUrl", "")
+    err_console.print(f"[bold]Connection status:[/bold] {status}")
+    if url:
+        err_console.print(f"[bold]Open this URL to authorize:[/bold] {url}")
+    else:
+        err_console.print("[green]App connected (no OAuth redirect needed).[/green]")
+
+
+@connectors_app.command("search")
+def connectors_search(
+    ref: str = typer.Argument(..., help="Connector name or ID"),
+    query: str = typer.Option(..., "--query", "-q", help="Natural-language use case (e.g. 'send email')"),
+    app: str = typer.Option(None, "--app", help="Filter by app name (e.g. github, gmail, slack)"),
+    limit: int = typer.Option(5, "--limit", "-n", help="Max results"),
+    as_json: bool = JSON_OPTION,
+):
+    """Search for available tools by use case."""
+    from ..connectors import (
+        ConnectorAuthError,
+        ConnectorNotFoundError,
+        find_connector,
+        read_auth,
+        search_tools,
+    )
+
+    try:
+        row = find_connector(ref)
+    except ConnectorNotFoundError:
+        err_console.print(f"[red]Connector not found:[/red] {ref}")
+        raise typer.Exit(1)
+    if not row.enabled:
+        err_console.print(f"[red]Connector {row.name!r} is disabled[/red]")
+        raise typer.Exit(1)
+    try:
+        auth_env = read_auth(row.id, row.name) if row.auth_ref else {}
+    except ConnectorAuthError as e:
+        err_console.print(f"[red]Auth error:[/red] {e}")
+        raise typer.Exit(1)
+    from ..connectors.errors import ConnectorProviderError
+
+    try:
+        result = search_tools(row, query, auth_env, apps=app, limit=limit)
+    except ConnectorProviderError as e:
+        err_console.print(f"[red]Provider error:[/red] {e}")
+        raise typer.Exit(1)
+    items = result.get("items", [])
+    if as_json:
+        print_json(items)
+        return
+    if not items:
+        err_console.print(f"No tools found for query: {query!r}")
+        return
+    for item in items:
+        slug = item.get("enum", item.get("name", "?"))
+        display = item.get("displayName") or item.get("display_name") or ""
+        app_id = item.get("appId", "")
+        tags = item.get("tags", [])
+        read_only = "readOnlyHint" in tags
+        err_console.print(f"  [bold]{slug}[/bold]")
+        err_console.print(f"    {display}")
+        err_console.print(f"    app={app_id}  read_only={read_only}")
+        err_console.print()
+
+
 @connectors_auth_app.command("write")
 def connectors_auth_write(
     ref: str = typer.Argument(..., help="Connector name or ID"),
     kvs: list[str] = typer.Argument(..., help="KEY=VALUE pairs (e.g. COMPOSIO_API_KEY=ak_xxx)"),
     as_json: bool = JSON_OPTION,
 ):
-    """Write or overwrite managed auth credentials for a connector."""
+    """Write managed auth credentials for a connector.
+
+    Merges with existing keys — adding a new key does not remove others.
+
+    Security note: KEY=VALUE args appear in shell history. For sensitive
+    values, prefix with a space (most shells skip history) or use:
+      export HISTCONTROL=ignorespace
+    """
     from ..connectors import ConnectorNotFoundError, auth_status, find_connector, write_auth
     from ..connectors.errors import ConnectorAuthError
 

@@ -21,6 +21,26 @@ def _get_adapter(provider: str) -> ModuleType:
     return adapter
 
 
+def list_apps(
+    connector: ConnectorRow,
+    auth_env: dict[str, str],
+) -> list[dict[str, Any]]:
+    adapter = _get_adapter(connector.provider)
+    return adapter.list_apps(auth_env, connector.config, connector.name)
+
+
+def initiate_connection(
+    connector: ConnectorRow,
+    app_name: str,
+    entity_id: str,
+    auth_env: dict[str, str],
+) -> dict[str, Any]:
+    adapter = _get_adapter(connector.provider)
+    return adapter.initiate_connection(
+        app_name, entity_id, auth_env, connector.config, connector.name,
+    )
+
+
 def execute_tool(
     connector: ConnectorRow,
     tool_slug: str,
@@ -42,6 +62,7 @@ def search_tools(
     query: str,
     auth_env: dict[str, str],
     *,
+    apps: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
     adapter = _get_adapter(connector.provider)
@@ -50,5 +71,6 @@ def search_tools(
         auth_env,
         connector.config,
         connector.name,
+        apps=apps,
         limit=limit,
     )

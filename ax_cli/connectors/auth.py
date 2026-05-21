@@ -72,8 +72,16 @@ def write_auth(connector_id: str, connector_name: str, kvs: dict[str, str]) -> P
     if not kvs:
         raise ConnectorAuthError(connector_name, "No key-value pairs provided")
 
-    content = _serialize_env(kvs)
+    # Merge with existing keys so we don't wipe previously stored credentials
     path = _auth_path(connector_id)
+    existing: dict[str, str] = {}
+    if path.exists():
+        try:
+            existing = _parse_env(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    merged = {**existing, **kvs}
+    content = _serialize_env(merged)
 
     tmp_path: Path | None = None
     try:
