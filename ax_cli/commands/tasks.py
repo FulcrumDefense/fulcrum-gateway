@@ -436,10 +436,17 @@ def get(
             data = client.get_task(task_id)
         except httpx.HTTPStatusError as e:
             handle_error(e)
+    # Unwrap the {"task": {...}} wrapper so --json output matches the flat
+    # shape used by `tasks create --json` and so `print_kv` renders the
+    # task fields directly instead of falling through to Python's
+    # dict __str__ on the inner dict (issue #64). When the upstream API
+    # already returns the task at the top level, `data.get("task", data)`
+    # is a no-op.
+    task = data.get("task", data) if isinstance(data, dict) else data
     if as_json:
-        print_json(data)
+        print_json(task)
     else:
-        print_kv(data)
+        print_kv(task)
 
 
 @app.command("update")
