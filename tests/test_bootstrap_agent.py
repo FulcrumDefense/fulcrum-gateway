@@ -465,7 +465,11 @@ def test_create_agent_in_space_409_falls_back_to_existing(monkeypatch):
     existing_agent = {"id": AGENT_ID, "name": "switchboard-12d6eafd", "space_id": SPACE_ID}
     http = _FakeHttp(
         {
-            ("POST", "/api/v1/agents"): (409, {"detail": "Agent 'switchboard-12d6eafd' already exists in this space"}, None),
+            ("POST", "/api/v1/agents"): (
+                409,
+                {"detail": "Agent 'switchboard-12d6eafd' already exists in this space"},
+                None,
+            ),
             ("GET", "/api/v1/agents"): (200, {"agents": [existing_agent]}, None),
         }
     )
@@ -494,9 +498,7 @@ def test_create_agent_in_space_409_with_no_match_re_raises(monkeypatch):
     )
     client = _FakeClient(http)
     with pytest.raises(httpx.HTTPStatusError) as exc:
-        bootstrap_cmd._create_agent_in_space(
-            client, name="mystery", space_id=SPACE_ID, description=None, model=None
-        )
+        bootstrap_cmd._create_agent_in_space(client, name="mystery", space_id=SPACE_ID, description=None, model=None)
     assert exc.value.response.status_code == 409
 
 
@@ -509,9 +511,7 @@ def test_create_agent_in_space_other_errors_still_raise(monkeypatch):
     )
     client = _FakeClient(http)
     with pytest.raises(httpx.HTTPStatusError) as exc:
-        bootstrap_cmd._create_agent_in_space(
-            client, name="x", space_id=SPACE_ID, description=None, model=None
-        )
+        bootstrap_cmd._create_agent_in_space(client, name="x", space_id=SPACE_ID, description=None, model=None)
     assert exc.value.response.status_code == 500
 
 
@@ -568,9 +568,11 @@ def test_mgmt_create_agent_409_falls_back_to_get():
         request=httpx.Request("POST", "http://test.local/api/v1/agents/manage/create"),
         response=httpx.Response(409, json={"detail": "already exists"}),
     )
-    http = _FakeHttp({
-        ("GET", "/api/v1/agents"): (200, {"agents": [existing]}, None),
-    })
+    http = _FakeHttp(
+        {
+            ("GET", "/api/v1/agents"): (200, {"agents": [existing]}, None),
+        }
+    )
     client = _MgmtFakeClient(http, mgmt_side_effect=exc_409)
     result = bootstrap_cmd._create_agent_in_space(
         client, name="existing-bot", space_id=SPACE_ID, description=None, model=None
@@ -588,9 +590,7 @@ def test_mgmt_create_agent_401_gives_actionable_error():
     http = _FakeHttp({})
     client = _MgmtFakeClient(http, mgmt_side_effect=exc_401)
     with pytest.raises(httpx.HTTPStatusError, match="ax gateway login"):
-        bootstrap_cmd._create_agent_in_space(
-            client, name="x", space_id=SPACE_ID, description=None, model=None
-        )
+        bootstrap_cmd._create_agent_in_space(client, name="x", space_id=SPACE_ID, description=None, model=None)
 
 
 def test_mgmt_create_agent_403_gives_actionable_error():
@@ -603,9 +603,7 @@ def test_mgmt_create_agent_403_gives_actionable_error():
     http = _FakeHttp({})
     client = _MgmtFakeClient(http, mgmt_side_effect=exc_403)
     with pytest.raises(httpx.HTTPStatusError, match="agents.create scope"):
-        bootstrap_cmd._create_agent_in_space(
-            client, name="x", space_id=SPACE_ID, description=None, model=None
-        )
+        bootstrap_cmd._create_agent_in_space(client, name="x", space_id=SPACE_ID, description=None, model=None)
 
 
 def test_mgmt_create_agent_route_miss_falls_through_to_legacy():
@@ -614,15 +612,18 @@ def test_mgmt_create_agent_route_miss_falls_through_to_legacy():
         "404 Not Found",
         request=httpx.Request("POST", "http://test.local/api/v1/agents/manage/create"),
         response=httpx.Response(
-            404, content=b"<html>Not Found</html>",
+            404,
+            content=b"<html>Not Found</html>",
             headers={"content-type": "text/html"},
             request=httpx.Request("POST", "http://test.local/api/v1/agents/manage/create"),
         ),
     )
     legacy_agent = {"id": AGENT_ID, "name": "legacy-agent", "space_id": SPACE_ID}
-    http = _FakeHttp({
-        ("POST", "/api/v1/agents"): (201, legacy_agent, None),
-    })
+    http = _FakeHttp(
+        {
+            ("POST", "/api/v1/agents"): (201, legacy_agent, None),
+        }
+    )
     client = _MgmtFakeClient(http, mgmt_side_effect=exc_html)
     result = bootstrap_cmd._create_agent_in_space(
         client, name="legacy-agent", space_id=SPACE_ID, description=None, model=None
@@ -635,9 +636,11 @@ def test_mgmt_create_agent_route_miss_falls_through_to_legacy():
 def test_mgmt_create_agent_transport_error_falls_through_to_legacy():
     """Network timeout/connection error falls through to legacy POST path."""
     legacy_agent = {"id": AGENT_ID, "name": "fallback-agent", "space_id": SPACE_ID}
-    http = _FakeHttp({
-        ("POST", "/api/v1/agents"): (201, legacy_agent, None),
-    })
+    http = _FakeHttp(
+        {
+            ("POST", "/api/v1/agents"): (201, legacy_agent, None),
+        }
+    )
     client = _MgmtFakeClient(http, mgmt_side_effect=ConnectionError("refused"))
     result = bootstrap_cmd._create_agent_in_space(
         client, name="fallback-agent", space_id=SPACE_ID, description=None, model=None
