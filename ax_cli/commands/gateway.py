@@ -33,7 +33,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import gateway as gateway_core
-from ..client import AxClient
+from ..client import RATE_LIMIT_CLI_LOW_WATER, RATE_LIMIT_MAX_WAIT, AxClient, _RateLimitState
 from ..commands import auth as auth_cmd
 from ..commands.bootstrap import (
     _create_agent_in_space,
@@ -50,6 +50,8 @@ from ..gateway import (
     _is_passive_runtime,
     _is_system_agent,
     _plugin_source_dir,
+    _RequestLogger,
+    _ui_request_logger,
     active_gateway_pid,
     active_gateway_pids,
     active_gateway_ui_pid,
@@ -170,7 +172,12 @@ def _resolve_gateway_login_token(explicit_token: str | None) -> str:
     return auth_cmd._resolve_login_token(None)
 
 
-def _load_gateway_user_client() -> AxClient:
+_gateway_rate_limit_state = _RateLimitState(low_water=RATE_LIMIT_CLI_LOW_WATER)
+_cli_request_logger = _RequestLogger(role="cli")
+_is_ui_server_process = False  # set to True at UI server startup for correct log attribution
+
+
+def _load_gateway_user_client(request_logger: "_RequestLogger | None" = None) -> AxClient:
     session = load_gateway_session()
     if not session:
         err_console.print("[red]Gateway is not logged in.[/red] Run `ax gateway login` first.")
@@ -182,7 +189,24 @@ def _load_gateway_user_client() -> AxClient:
     if not token.startswith("axp_u_"):
         err_console.print("[red]Gateway bootstrap currently requires a user PAT (axp_u_).[/red]")
         raise typer.Exit(1)
-    return AxClient(base_url=str(session.get("base_url") or auth_cmd.DEFAULT_LOGIN_BASE_URL), token=token)
+    import datetime
+
+    def _on_rate_limit_wait(wait_seconds: float, reset_at: float) -> None:
+        reset_str = datetime.datetime.fromtimestamp(reset_at).strftime("%H:%M:%S")
+        err_console.print(
+            f"[yellow]Rate limit reached — waiting {wait_seconds:.0f}s until {reset_str} before next request.[/yellow]"
+        )
+        record_gateway_activity("rate_limit_wait", wait_seconds=wait_seconds, reset_at=reset_str)
+
+    logger = request_logger or (_ui_request_logger if _is_ui_server_process else _cli_request_logger)
+    return AxClient(
+        base_url=str(session.get("base_url") or auth_cmd.DEFAULT_LOGIN_BASE_URL),
+        token=token,
+        on_rate_limit_wait=_on_rate_limit_wait,
+        max_rate_limit_wait=RATE_LIMIT_MAX_WAIT,
+        rate_limit_state=_gateway_rate_limit_state,
+        on_request_complete=logger.make_callback(),
+    )
 
 
 def _load_gateway_session_or_exit() -> dict:
@@ -229,7 +253,8 @@ class UpstreamRateLimitedError(RuntimeError):
         except (ValueError, AttributeError, TypeError):
             retry_after = None
         self.retry_after_seconds = retry_after
-        super().__init__(f"Upstream rate-limited after {retries_attempted} retries")
+        wait_hint = f" — retry after {retry_after}s" if retry_after else ""
+        super().__init__(f"Upstream rate-limited after {retries_attempted} retries{wait_hint}")
 
 
 def _with_upstream_429_retry(
@@ -237,7 +262,7 @@ def _with_upstream_429_retry(
     *,
     max_retries: int,
     base_wait: float = 1.0,
-    max_wait: float = 120.0,
+    max_wait: float = RATE_LIMIT_MAX_WAIT,
 ):
     """Run ``call`` and retry on httpx 429, honoring ``Retry-After`` when present.
 
@@ -266,6 +291,8 @@ def _with_upstream_429_retry(
                 hint = float(retry_after_raw) if retry_after_raw is not None else 0.0
             except (TypeError, ValueError):
                 hint = 0.0
+            if hint > max_wait:
+                raise UpstreamRateLimitedError(exc, attempts) from exc
             exp = base_wait * (2**attempts)
             wait = min(max(exp, hint), max_wait)
             time.sleep(wait)
@@ -7119,6 +7146,12 @@ def ui(
             webbrowser.open_new_tab(url)
         except Exception:
             err_console.print("[yellow]Could not open a browser automatically.[/yellow]")
+    global _is_ui_server_process
+    _is_ui_server_process = True
+    try:
+        _gateway_rate_limit_state.warm(_load_gateway_user_client(request_logger=_ui_request_logger))
+    except Exception:
+        pass  # best-effort — don't block UI startup on a warm failure
     try:
         server.serve_forever()
     except KeyboardInterrupt:

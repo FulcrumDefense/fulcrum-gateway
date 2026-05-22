@@ -1969,3 +1969,51 @@ class TestAgentsListTextRendering:
         data = json.loads(result.output)
         assert data["count"] == 1
         assert data["agents"][0]["name"] == "bot2"
+
+
+# ── _load_gateway_user_client request logging ─────────────────────────────
+
+
+def _read_log_records(log_path) -> list[dict]:
+    import json as _json
+    records = []
+    if log_path.exists():
+        for line in log_path.read_text().splitlines():
+            if line.strip():
+                try:
+                    records.append(_json.loads(line))
+                except Exception:
+                    pass
+    return records
+
+
+class TestLoadGatewayUserClientLogging:
+    """_load_gateway_user_client attaches the correct role to logged requests."""
+
+    def _setup(self, monkeypatch):
+        monkeypatch.setattr(gw_cmd._cli_request_logger, "_enabled", True)
+        monkeypatch.setattr(gw_cmd._ui_request_logger, "_enabled", True)
+        monkeypatch.setattr(gw_cmd, "load_gateway_session", lambda: {"token": "axp_u_test", "base_url": "http://x"})
+
+    def test_logs_cli_role_by_default(self, monkeypatch):
+        monkeypatch.setattr(gw_cmd, "_is_ui_server_process", False)
+        self._setup(monkeypatch)
+        client = gw_cmd._load_gateway_user_client()
+        client._http._on_request_complete("GET", "/api/v1/agents", 200, 50, 9999999999.0, "application/json")
+        records = _read_log_records(gateway_core.api_requests_log_path())
+        assert records, "expected at least one log entry"
+        record = records[-1]
+        assert record["role"] == "cli"
+        assert record["method"] == "GET"
+        assert record["status"] == 200
+        assert record["remaining"] == 50
+
+    def test_logs_ui_server_role_in_ui_process(self, monkeypatch):
+        monkeypatch.setattr(gw_cmd, "_is_ui_server_process", True)
+        self._setup(monkeypatch)
+        client = gw_cmd._load_gateway_user_client()
+        client._http._on_request_complete("GET", "/api/v1/agents", 200, 50, None, "application/json")
+        records = _read_log_records(gateway_core.api_requests_log_path())
+        assert records, "expected at least one log entry"
+        assert records[-1]["role"] == "ui_server"
+        monkeypatch.setattr(gw_cmd, "_is_ui_server_process", False)

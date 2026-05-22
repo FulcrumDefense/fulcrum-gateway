@@ -34,6 +34,16 @@ What it does, in order:
 
 Every mutating step logs a one-liner; failures bail loudly with the source
 of the token being used (no more "Invalid credential" without a file path).
+
+Feature flags
+-------------
+AX_USE_MGMT_CREATE_API (default off)
+    Set to ``1`` / ``true`` / ``yes`` to attempt agent creation via the
+    management API paths (``/api/v1/agents/manage/create``,
+    ``/agents/manage/create``) before falling back to the legacy
+    ``POST /api/v1/agents``. Disabled by default because these routes have
+    returned 405 or hit CloudFront, potentially consuming rate-limit budget
+    uselessly. Re-enable once confirmed valid.
 """
 
 from __future__ import annotations
@@ -147,6 +157,39 @@ def _create_agent_in_space(client, *, name: str, space_id: str, description: str
     auto-created switchboard sender agent already exists on the backend but
     isn't in the local Gateway registry (drift after registry resets).
     """
+    use_mgmt_api = os.environ.get("AX_USE_MGMT_CREATE_API", "").lower() in {"1", "true", "yes"}
+    if use_mgmt_api and hasattr(client, "_exchanger") and client._exchanger:
+        try:
+            result = client.mgmt_create_agent(name, space_id=space_id, description=description, model=model)
+            # Management API may wrap the agent in {"agent": {...}} — unwrap so
+            # callers always get the agent dict and .get("id") resolves correctly.
+            return result.get("agent", result) if isinstance(result, dict) else result
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 409:
+                existing = _find_agent_in_space(client, name, space_id)
+                if existing:
+                    return existing
+                raise
+            if status == 401:
+                raise httpx.HTTPStatusError(
+                    "Agent creation unauthenticated (401) — token is invalid or expired. "
+                    "Re-run `ax gateway login` to refresh your session.",
+                    request=exc.request,
+                    response=exc.response,
+                ) from exc
+            if status == 403:
+                raise httpx.HTTPStatusError(
+                    "Agent creation forbidden (403) — token is missing agents.create scope. "
+                    "Re-issue your token with the required scope or contact your space admin.",
+                    request=exc.request,
+                    response=exc.response,
+                ) from exc
+            if _is_route_miss(exc):
+                pass  # fall through to legacy POST /api/v1/agents
+            else:
+                raise
+
     body: dict = {"name": name}
     if description is not None:
         body["description"] = description

@@ -2357,88 +2357,6 @@ def test_managed_echo_runtime_processes_message(tmp_path, monkeypatch):
     assert "reply_sent" in event_names
 
 
-def test_runtime_sends_connected_heartbeat_on_first_sse_event(tmp_path, monkeypatch):
-    """Listener loop sends 'connected' heartbeat on first SSE event after connecting."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    token_file = tmp_path / "token"
-    token_file.write_text("axp_a_agent.secret")
-    payload = {"id": "msg-hb", "content": "ping", "author": {"id": "u1", "name": "u", "type": "user"}, "mentions": ["hb-bot"]}
-    shared = _SharedRuntimeClient(payload)
-    runtime = gateway_core.ManagedAgentRuntime(
-        {"name": "hb-bot", "agent_id": "agent-hb", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
-        client_factory=lambda **kwargs: shared,
-    )
-    runtime.start()
-    deadline = time.time() + 2.0
-    while time.time() < deadline and not shared.heartbeats:
-        time.sleep(0.05)
-    runtime.stop()
-    assert any(h["status"] == "connected" for h in shared.heartbeats)
-
-
-def test_runtime_sends_stale_heartbeat_on_sse_disconnect(tmp_path, monkeypatch):
-    """Listener loop sends 'stale' heartbeat when SSE connection drops."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    token_file = tmp_path / "token"
-    token_file.write_text("axp_a_agent.secret")
-
-    class _FailOnSecondConnect(_SharedRuntimeClient):
-        def connect_sse(self, *, space_id, timeout=None):
-            self.connect_calls += 1
-            if self.connect_calls == 1:
-                raise ConnectionError("SSE dropped")
-            raise ConnectionError("test done")
-
-    shared = _FailOnSecondConnect({})
-    runtime = gateway_core.ManagedAgentRuntime(
-        {"name": "stale-bot", "agent_id": "agent-stale", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
-        client_factory=lambda **kwargs: shared,
-    )
-    runtime.start()
-    deadline = time.time() + 3.0
-    while time.time() < deadline and not any(h["status"] == "stale" for h in shared.heartbeats):
-        time.sleep(0.05)
-    runtime.stop()
-    assert any(h["status"] == "stale" for h in shared.heartbeats)
-
-
-def test_runtime_sends_offline_heartbeat_on_stop(tmp_path, monkeypatch):
-    """stop() sends 'offline' heartbeat using the agent-bound client."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    token_file = tmp_path / "token"
-    token_file.write_text("axp_a_agent.secret")
-    shared = _SharedRuntimeClient({})
-    runtime = gateway_core.ManagedAgentRuntime(
-        {"name": "offline-bot", "agent_id": "agent-off", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
-        client_factory=lambda **kwargs: shared,
-    )
-    runtime.stop()
-    assert any(h["status"] == "offline" for h in shared.heartbeats)
-
-
-def test_runtime_sends_setup_error_heartbeat_on_error_state(tmp_path, monkeypatch):
-    """_update_state fires 'setup_error' heartbeat on first transition to error."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    token_file = tmp_path / "token"
-    token_file.write_text("axp_a_agent.secret")
-    shared = _SharedRuntimeClient({})
-    runtime = gateway_core.ManagedAgentRuntime(
-        {"name": "err-bot", "agent_id": "agent-err", "space_id": "s1", "base_url": "https://paxai.app", "runtime_type": "echo", "token_file": str(token_file)},
-        client_factory=lambda **kwargs: shared,
-    )
-    runtime._update_state(effective_state="error", last_error="test error")
-    assert any(h["status"] == "setup_error" for h in shared.heartbeats)
-    # Second transition to error should not fire again
-    runtime._update_state(effective_state="error", last_error="still broken")
-    assert sum(1 for h in shared.heartbeats if h["status"] == "setup_error") == 1
 
 
 def test_managed_exec_runtime_parses_gateway_progress_events(tmp_path, monkeypatch):
@@ -7388,8 +7306,9 @@ def test_with_upstream_429_retry_falls_back_to_exp_backoff_without_retry_after(m
 
 
 def test_with_upstream_429_retry_caps_wait_at_max(monkeypatch):
-    """Pathological Retry-After values are capped at ``max_wait`` so a
-    misbehaving server can't hang the CLI for hours.
+    """Retry-After values exceeding max_wait cause immediate failure — retrying
+    after a shorter window would ignore the server's explicit guidance and could
+    trigger circuit-breaker escalation.
     """
     sleeps: list[float] = []
     monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
@@ -7405,8 +7324,10 @@ def test_with_upstream_429_retry_caps_wait_at_max(monkeypatch):
         raise insane
 
     with pytest.raises(gateway_cmd.UpstreamRateLimitedError):
-        gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0, max_wait=30.0)
-    assert sleeps == [30.0, 30.0]  # both capped at max_wait
+        gateway_cmd._with_upstream_429_retry(
+            call, max_retries=2, base_wait=1.0, max_wait=30.0
+        )
+    assert sleeps == []  # no sleep — fails immediately when Retry-After exceeds max_wait
 
 
 def test_with_upstream_429_retry_propagates_other_errors(monkeypatch):
@@ -7425,6 +7346,20 @@ def test_with_upstream_429_retry_propagates_other_errors(monkeypatch):
 
     with pytest.raises(httpx.HTTPStatusError):
         gateway_cmd._with_upstream_429_retry(call, max_retries=3, base_wait=0.1)
+
+
+def test_upstream_rate_limited_error_includes_retry_after_in_message(monkeypatch):
+    """UpstreamRateLimitedError message includes the retry-after time."""
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: None)
+
+    def call():
+        raise _make_429_error()  # retry-after: 12
+
+    with pytest.raises(gateway_cmd.UpstreamRateLimitedError) as exc_info:
+        gateway_cmd._with_upstream_429_retry(call, max_retries=1, base_wait=1.0)
+    assert "12s" in str(exc_info.value)
+
+
 
 
 def test_backend_agent_record_falls_back_to_cache_on_failure(monkeypatch, tmp_path):
@@ -8907,3 +8842,5 @@ def test_gateway_local_connect_404_uses_actionable_guidance(monkeypatch):
     assert "@wishy" in msg
     assert "Live Listener" in msg
     assert "ax gateway local connect wishy --workdir /repo" in msg
+
+

@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import socket
+import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,6 +25,7 @@ import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
+from ax_cli import gateway as gateway_core
 from ax_cli.commands import gateway as gw_cmd
 from ax_cli.main import app
 
@@ -1980,3 +1982,113 @@ class TestRenderActivityTable:
         assert "test" in rendered
         assert "@bot1" in rendered
         assert "m1" in rendered
+
+
+# ── ManagedAgentRuntime heartbeat signals ────────────────────────────────────
+
+
+class _FakeHeartbeatClient:
+    """Minimal client stub that records send_heartbeat calls."""
+
+    def __init__(self, payload=None):
+        self.payload = payload or {}
+        self.sent = []
+        self.heartbeats = []
+        self.connect_calls = 0
+
+    def connect_sse(self, *, space_id, timeout=None):
+        self.connect_calls += 1
+        if self.connect_calls > 1:
+            raise ConnectionError("test done")
+        from tests.test_gateway_commands import _FakeSseResponse
+
+        return _FakeSseResponse(self.payload)
+
+    def send_message(self, space_id, content, *, agent_id=None, parent_id=None, **kwargs):
+        self.sent.append(content)
+        return {"message": {"id": "reply-1"}}
+
+    def set_agent_processing_status(self, *args, **kwargs):
+        return {"ok": True}
+
+    def send_heartbeat(self, *, agent_id=None, status=None, note=None, cadence_seconds=None):
+        self.heartbeats.append({"agent_id": agent_id, "status": status})
+        return {"ok": True}
+
+    def close(self):
+        return None
+
+
+class TestManagedAgentRuntimeHeartbeats:
+    """ManagedAgentRuntime sends correct liveness signals at each state transition."""
+
+    def _entry(self, name, tmp_path):
+        token_file = tmp_path / "token"
+        token_file.write_text("axp_a_agent.secret")
+        return {
+            "name": name,
+            "agent_id": f"agent-{name}",
+            "space_id": "s1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "echo",
+            "token_file": str(token_file),
+        }
+
+    def test_connected_heartbeat_on_first_sse_event(self, tmp_path):
+        payload = {
+            "id": "msg-hb",
+            "content": "ping",
+            "author": {"id": "u1", "name": "u", "type": "user"},
+            "mentions": ["hb-bot"],
+        }
+        client = _FakeHeartbeatClient(payload)
+        runtime = gateway_core.ManagedAgentRuntime(
+            self._entry("hb-bot", tmp_path),
+            client_factory=lambda **kwargs: client,
+        )
+        runtime.start()
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not client.heartbeats:
+            time.sleep(0.05)
+        runtime.stop()
+        assert any(h["status"] == "connected" for h in client.heartbeats)
+
+    def test_stale_heartbeat_on_sse_disconnect(self, tmp_path):
+        class _FailFirst(_FakeHeartbeatClient):
+            def connect_sse(self, *, space_id, timeout=None):
+                self.connect_calls += 1
+                if self.connect_calls == 1:
+                    raise ConnectionError("SSE dropped")
+                raise ConnectionError("test done")
+
+        client = _FailFirst()
+        runtime = gateway_core.ManagedAgentRuntime(
+            self._entry("stale-bot", tmp_path),
+            client_factory=lambda **kwargs: client,
+        )
+        runtime.start()
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not any(h["status"] == "stale" for h in client.heartbeats):
+            time.sleep(0.05)
+        runtime.stop()
+        assert any(h["status"] == "stale" for h in client.heartbeats)
+
+    def test_offline_heartbeat_on_stop(self, tmp_path):
+        client = _FakeHeartbeatClient()
+        runtime = gateway_core.ManagedAgentRuntime(
+            self._entry("offline-bot", tmp_path),
+            client_factory=lambda **kwargs: client,
+        )
+        runtime.stop()
+        assert any(h["status"] == "offline" for h in client.heartbeats)
+
+    def test_setup_error_heartbeat_on_error_state(self, tmp_path):
+        client = _FakeHeartbeatClient()
+        runtime = gateway_core.ManagedAgentRuntime(
+            self._entry("err-bot", tmp_path),
+            client_factory=lambda **kwargs: client,
+        )
+        runtime._update_state(effective_state="error", last_error="test error")
+        assert any(h["status"] == "setup_error" for h in client.heartbeats)
+        runtime._update_state(effective_state="error", last_error="still broken")
+        assert sum(1 for h in client.heartbeats if h["status"] == "setup_error") == 1

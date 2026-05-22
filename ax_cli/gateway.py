@@ -5,6 +5,17 @@ credentials, supervises managed runtimes, and keeps lightweight desired vs
 effective state in a registry file. The first slice intentionally uses
 filesystem state plus a foreground daemon so it can ship quickly without
 introducing a second backend.
+
+Feature flags
+-------------
+AX_LOG_API_REQUESTS (default off)
+    Set to ``1`` / ``true`` / ``yes`` to log every outbound API request to
+    ``~/.ax/gateway/api-requests.log`` as JSON lines. Each record includes
+    timestamp, pid, client role (daemon/ui_server/cli), method, path, HTTP
+    status, rate-limit remaining, reset timestamp, and agent identity where
+    known. Useful for diagnosing rate-limit budget consumption and finding
+    worst-offender request patterns. The update script enables this by
+    default and rotates the log on each upgrade.
 """
 
 from __future__ import annotations
@@ -33,7 +44,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .client import AxClient
+from .client import AxClient, _RateLimitState
 from .commands.listen import (
     _is_self_authored,
     _iter_sse,
@@ -2923,6 +2934,91 @@ def activity_log_path() -> Path:
     return gateway_dir() / "activity.jsonl"
 
 
+def api_requests_log_path() -> Path:
+    return gateway_dir() / "api-requests.log"
+
+
+class _RequestLogger:
+    """Logs every API request to api-requests.log when AX_LOG_API_REQUESTS=1.
+
+    Each instance carries a role label and optional agent identity so log
+    records identify which process/client/agent made the request. All three
+    gateway destinations (daemon, UI server, CLI) write to the same file via
+    O_APPEND; a per-instance lock serialises writes within each process.
+    """
+
+    def __init__(self, role: str) -> None:
+        import threading
+
+        self.role = role
+        self._lock = threading.Lock()
+        self._enabled = os.environ.get("AX_LOG_API_REQUESTS", "").lower() in {"1", "true", "yes"}
+
+    def make_callback(self, *, agent_name: str | None = None, agent_id: str | None = None):
+        """Return an on_request_complete callback capturing this logger's identity."""
+
+        def _cb(
+            method: str, path: str, status: int, remaining: int | None, reset_at: float | None, content_type: str = ""
+        ) -> None:
+            self._write(
+                method,
+                path,
+                status,
+                remaining,
+                reset_at,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                content_type=content_type,
+            )
+
+        return _cb
+
+    def _write(
+        self,
+        method: str,
+        path: str,
+        status: int,
+        remaining: int | None,
+        reset_at: float | None,
+        *,
+        agent_name: str | None,
+        agent_id: str | None,
+        content_type: str = "",
+    ) -> None:
+        if not self._enabled:
+            return
+        import json as _json
+        from datetime import datetime, timezone
+
+        record: dict = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "role": self.role,
+            "method": method,
+            "path": path,
+            "status": status,
+        }
+        record["content_type"] = content_type or None
+        record["agent_name"] = agent_name or None
+        record["agent_id"] = agent_id or None
+        record["remaining"] = remaining
+        record["reset_at"] = reset_at or None
+        line = _json.dumps(record) + "\n"
+        log_path = api_requests_log_path()
+        try:
+            with self._lock:
+                with open(log_path, "a") as f:
+                    f.write(line)
+        except OSError as exc:
+            import sys
+
+            print(f"[ax-gateway] WARNING: api-requests.log write failed: {exc}", file=sys.stderr)
+
+
+_daemon_request_logger = _RequestLogger(role="daemon")
+_ui_request_logger = _RequestLogger(role="ui_server")
+
+
 def space_cache_path() -> Path:
     """Disk cache of {id, name, slug} triples for the user's visible spaces.
 
@@ -4738,10 +4834,12 @@ class ManagedAgentRuntime:
         *,
         client_factory: Callable[..., Any] = AxClient,
         logger: RuntimeLogger | None = None,
+        rate_limit_state: _RateLimitState | None = None,
     ) -> None:
         self.entry = dict(entry)
         self.client_factory = client_factory
         self.logger = logger or (lambda _msg: None)
+        self._rate_limit_state = rate_limit_state
         self.stop_event = threading.Event()
         self._listener_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
@@ -4819,6 +4917,11 @@ class ManagedAgentRuntime:
             token=self._token(),
             agent_name=self.name,
             agent_id=self.agent_id,
+            rate_limit_state=self._rate_limit_state,
+            on_request_complete=_daemon_request_logger.make_callback(
+                agent_name=self.name,
+                agent_id=str(self.agent_id or ""),
+            ),
         )
 
     def _send_heartbeat_best_effort(self, status: str) -> None:
@@ -6477,6 +6580,7 @@ class GatewayDaemon:
         self.poll_interval = poll_interval
         self._runtimes: dict[str, ManagedAgentRuntime] = {}
         self._stop = threading.Event()
+        self._rate_limit_state = _RateLimitState()
 
     def _log(self, message: str) -> None:
         self.logger(message)
@@ -6661,7 +6765,12 @@ class GatewayDaemon:
                     self._runtimes.pop(name, None)
                     runtime = None
             if runtime is None:
-                runtime = ManagedAgentRuntime(entry, client_factory=self.client_factory, logger=self.logger)
+                runtime = ManagedAgentRuntime(
+                    entry,
+                    client_factory=self.client_factory,
+                    logger=self.logger,
+                    rate_limit_state=self._rate_limit_state,
+                )
                 self._runtimes[name] = runtime
                 runtime.start()
             else:
@@ -6836,6 +6945,8 @@ class GatewayDaemon:
             return self.client_factory(
                 base_url=session.get("base_url"),
                 token=token,
+                rate_limit_state=self._rate_limit_state,
+                on_request_complete=_daemon_request_logger.make_callback(agent_name="sweep"),
             )
         except Exception:  # noqa: BLE001
             return None
@@ -6917,6 +7028,9 @@ class GatewayDaemon:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 previous_handlers[sig] = signal.getsignal(sig)
                 signal.signal(sig, _request_stop)
+        sweep_client = self._sweep_client(session)
+        if sweep_client:
+            self._rate_limit_state.warm(sweep_client)
         try:
             while not self._stop.is_set():
                 registry = load_gateway_registry()

@@ -3206,3 +3206,23 @@ class TestUpstreamRateLimitedError:
         exc = httpx.HTTPStatusError("429", request=request, response=response)
         rate_err = gw_cmd.UpstreamRateLimitedError(exc, retries_attempted=2)
         assert rate_err.retry_after_seconds is None
+
+
+# ---------------------------------------------------------------------------
+# _RequestLogger
+# ---------------------------------------------------------------------------
+
+
+class TestRequestLogger:
+    """_RequestLogger writes structured records and handles I/O failures gracefully."""
+
+    def test_write_failure_prints_to_stderr(self, monkeypatch, capsys):
+        from ax_cli.gateway import _RequestLogger
+        monkeypatch.setenv("AX_LOG_API_REQUESTS", "1")
+        logger = _RequestLogger(role="test")
+
+        monkeypatch.setattr("builtins.open", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")))
+        logger._write("GET", "/test", 200, 99, None, agent_name=None, agent_id=None)
+        captured = capsys.readouterr()
+        assert "api-requests.log write failed" in captured.err
+        assert "disk full" in captured.err
