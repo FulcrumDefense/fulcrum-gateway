@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import socket
+import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,8 +24,6 @@ import pytest
 import typer
 from rich.console import Console
 from typer.testing import CliRunner
-
-import time
 
 from ax_cli import gateway as gateway_core
 from ax_cli.commands import gateway as gw_cmd
@@ -2002,6 +2001,7 @@ class _FakeHeartbeatClient:
         if self.connect_calls > 1:
             raise ConnectionError("test done")
         from tests.test_gateway_commands import _FakeSseResponse
+
         return _FakeSseResponse(self.payload)
 
     def send_message(self, space_id, content, *, agent_id=None, parent_id=None, **kwargs):
@@ -2035,7 +2035,12 @@ class TestManagedAgentRuntimeHeartbeats:
         }
 
     def test_connected_heartbeat_on_first_sse_event(self, tmp_path):
-        payload = {"id": "msg-hb", "content": "ping", "author": {"id": "u1", "name": "u", "type": "user"}, "mentions": ["hb-bot"]}
+        payload = {
+            "id": "msg-hb",
+            "content": "ping",
+            "author": {"id": "u1", "name": "u", "type": "user"},
+            "mentions": ["hb-bot"],
+        }
         client = _FakeHeartbeatClient(payload)
         runtime = gateway_core.ManagedAgentRuntime(
             self._entry("hb-bot", tmp_path),

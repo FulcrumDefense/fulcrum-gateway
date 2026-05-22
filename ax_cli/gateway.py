@@ -6874,7 +6874,6 @@ class GatewayDaemon:
         registry: dict[str, Any],
         *,
         session: dict[str, Any] | None,
-        client: Any | None = None,
     ) -> None:
         """Per-tick sweep: observe liveness and skip non-roster agents.
 
@@ -6951,7 +6950,7 @@ class GatewayDaemon:
             while not self._stop.is_set():
                 registry = load_gateway_registry()
                 registry = self._reconcile_registry(registry, session)
-                self._sweep_lifecycle(registry, session=session, client=sweep_client)
+                self._sweep_lifecycle(registry, session=session)
                 save_gateway_registry(registry)
                 if once:
                     break
