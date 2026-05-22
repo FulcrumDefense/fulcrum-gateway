@@ -17,7 +17,7 @@ session continuity beyond per-call history.
 
 Auth: GOOGLE_API_KEY environment variable.
 Models: https://ai.google.dev/gemini-api/docs/models
-        (default: gemini-1.5-flash)
+        (default: gemini-2.5-flash)
 """
 
 from __future__ import annotations
@@ -290,21 +290,41 @@ class GeminiSDKRuntime(BaseRuntime):
             except Exception as e:
                 error_str = str(e)
                 log.error(f"gemini_sdk: API error opening stream: {error_str}")
+                lower_err = error_str.lower()
+                # Why string-matching instead of catching google.api_core.exceptions
+                # subclasses directly: genai.GenerativeModel.generate_content does
+                # not consistently surface the typed PermissionDenied /
+                # ResourceExhausted / DeadlineExceeded classes through the
+                # streaming code path — they often arrive wrapped or stringified.
+                # A regex classifier on the message string is the defensive
+                # choice. groq_sdk.py and leapfrog_sdk.py both use the typed
+                # path because their underlying SDKs surface exceptions cleanly.
                 is_timeout = (
-                    "timeout" in error_str.lower()
-                    or "deadline" in error_str.lower()
-                    or "timed out" in error_str.lower()
+                    "timeout" in lower_err
+                    or "deadline" in lower_err
+                    or "timed out" in lower_err
                 )
-                # Use word-boundary matching so substrings like "rate" don't
+                # Word-boundary matching so substrings like "rate" don't
                 # accidentally match unrelated words (e.g. "generateContent"
                 # in a 404 model-not-found error, which would misclassify a
                 # crash as a rate limit).
-                lower_err = error_str.lower()
                 is_rate_limit = (
                     "429" in error_str
                     or "resourceexhausted" in lower_err
                     or re.search(r"\brate\b", lower_err) is not None
                     or re.search(r"\bquota\b", lower_err) is not None
+                )
+                # Auth failures (401 / 403) are operator-actionable — the user
+                # must see them in the chat reply so they can rotate or fix
+                # GOOGLE_API_KEY. Mirrors groq_sdk.py's auth_error exit_reason.
+                is_auth_error = (
+                    "401" in error_str
+                    or "403" in error_str
+                    or "permission denied" in lower_err
+                    or "permissiondenied" in lower_err
+                    or "unauthenticated" in lower_err
+                    or re.search(r"\bauthentication\b", lower_err) is not None
+                    or re.search(r"\bapi[_ ]key\b", lower_err) is not None
                 )
                 if is_timeout:
                     return RuntimeResult(
@@ -322,6 +342,15 @@ class GeminiSDKRuntime(BaseRuntime):
                         tool_count=tool_count,
                         files_written=files_written,
                         exit_reason="rate_limited",
+                        elapsed_seconds=int(time.time() - start_time),
+                    )
+                if is_auth_error:
+                    return RuntimeResult(
+                        text="Gemini authentication failed. Check GOOGLE_API_KEY.",
+                        history=history,
+                        tool_count=tool_count,
+                        files_written=files_written,
+                        exit_reason="auth_error",
                         elapsed_seconds=int(time.time() - start_time),
                     )
                 return RuntimeResult(
@@ -460,12 +489,22 @@ class GeminiSDKRuntime(BaseRuntime):
                     short = result.output[:200] if result.output else ""
                     cb.on_tool_end(name, short)
 
+                    # Cap tool output at TOOL_OUTPUT_CAP bytes to bound context
+                    # growth, and surface a truncation marker when we hit the
+                    # cap so the model can tell content was clipped (otherwise
+                    # it may reason as if it has the full output, e.g. assume a
+                    # large file was fully read). Mirrors groq_sdk.py 411-427.
+                    full_output = result.output or ""
+                    if len(full_output) > TOOL_OUTPUT_CAP:
+                        tool_content = full_output[:TOOL_OUTPUT_CAP] + "\n[output truncated]"
+                    else:
+                        tool_content = full_output
                     history.append(
                         {
                             "role": "tool",
                             "tool_call_id": f"call_{turn}_{function_calls.index(fc)}",
                             "_tool_name": name,
-                            "content": (result.output or "")[:TOOL_OUTPUT_CAP],
+                            "content": tool_content,
                         }
                     )
 

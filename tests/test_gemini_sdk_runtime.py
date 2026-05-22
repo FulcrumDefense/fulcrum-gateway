@@ -545,3 +545,144 @@ def test_gemini_sdk_returns_iteration_limit_when_max_turns_exhausted(monkeypatch
     assert fake_model.generate_content.call_count == MAX_TURNS
     # User-visible message should reflect the bounded-loop exit.
     assert "turn limit" in result.text.lower()
+
+
+def test_gemini_sdk_appends_truncation_marker_when_tool_output_exceeds_cap(monkeypatch):
+    """Tool output longer than TOOL_OUTPUT_CAP must be clipped AND get a
+    '[output truncated]' marker appended so the model can tell content was
+    clipped. Without the marker the model may reason as if it has the full
+    output (e.g. assume a large file was fully read). Mirrors groq_sdk.py
+    behavior (lines 411-427)."""
+    import tools as tools_mod
+
+    from ax_cli.runtimes.hermes.runtimes import get_runtime
+    from ax_cli.runtimes.hermes.runtimes.gemini_sdk import TOOL_OUTPUT_CAP
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test_key")
+
+    turn1 = iter(
+        [
+            _fake_chunk(_fake_function_call_part("read_file", {"path": "/big.txt"})),
+        ]
+    )
+    turn2 = iter([_fake_chunk(_fake_text_part("ok"))])
+    fake_model = MagicMock()
+    fake_model.generate_content.side_effect = [turn1, turn2]
+    _install_fake_genai(monkeypatch, fake_model)
+
+    # Output 2x the cap so we definitely hit the truncation path.
+    big_output = "A" * (TOOL_OUTPUT_CAP * 2)
+    monkeypatch.setattr(
+        tools_mod,
+        "execute_tool",
+        lambda name, args, workdir: tools_mod.ToolResult(output=big_output),
+    )
+
+    rt = get_runtime("gemini_sdk")
+    result = rt.execute("Read it.", workdir="/tmp")
+
+    tool_msg = next(h for h in result.history if h.get("role") == "tool")
+    content = tool_msg["content"]
+    # Marker appended.
+    assert content.endswith("\n[output truncated]")
+    # Truncated to the cap (plus the marker).
+    assert len(content) == TOOL_OUTPUT_CAP + len("\n[output truncated]")
+    # Original bytes are preserved up to the cap.
+    assert content.startswith("A" * TOOL_OUTPUT_CAP)
+
+
+def test_gemini_sdk_does_not_append_marker_when_tool_output_under_cap(monkeypatch):
+    """Marker must NOT appear when output is at or below the cap. Regression
+    guard against accidentally appending to every tool message (which would
+    confuse the model on small outputs)."""
+    import tools as tools_mod
+
+    from ax_cli.runtimes.hermes.runtimes import get_runtime
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test_key")
+
+    turn1 = iter(
+        [
+            _fake_chunk(_fake_function_call_part("read_file", {"path": "/tiny.txt"})),
+        ]
+    )
+    turn2 = iter([_fake_chunk(_fake_text_part("ok"))])
+    fake_model = MagicMock()
+    fake_model.generate_content.side_effect = [turn1, turn2]
+    _install_fake_genai(monkeypatch, fake_model)
+
+    monkeypatch.setattr(
+        tools_mod,
+        "execute_tool",
+        lambda name, args, workdir: tools_mod.ToolResult(output="small output"),
+    )
+
+    rt = get_runtime("gemini_sdk")
+    result = rt.execute("Read it.", workdir="/tmp")
+
+    tool_msg = next(h for h in result.history if h.get("role") == "tool")
+    assert tool_msg["content"] == "small output"
+    assert "[output truncated]" not in tool_msg["content"]
+
+
+def test_gemini_sdk_returns_auth_error_on_permission_denied(monkeypatch):
+    """A 'permission denied' / 401 / 403 from generate_content must surface
+    as exit_reason='auth_error' so operators can rotate GOOGLE_API_KEY rather
+    than see a generic 'crashed'. Mirrors groq_sdk.py / leapfrog_sdk.py
+    auth_error path. Tests the string-matching classifier defensively because
+    google.api_core.exceptions subclasses are inconsistently surfaced through
+    the streaming code path (see inline comment in gemini_sdk.py)."""
+    from ax_cli.runtimes.hermes.runtimes import get_runtime
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test_key")
+
+    fake_model = MagicMock()
+    fake_model.generate_content.side_effect = RuntimeError(
+        "403 Permission denied: API key invalid or revoked"
+    )
+    _install_fake_genai(monkeypatch, fake_model)
+
+    rt = get_runtime("gemini_sdk")
+    result = rt.execute("hello", workdir="/tmp")
+
+    assert result.exit_reason == "auth_error"
+    assert "GOOGLE_API_KEY" in result.text
+
+
+def test_gemini_sdk_returns_auth_error_on_401_unauthenticated(monkeypatch):
+    """Companion to the 403 test: 401 / 'unauthenticated' wording must also
+    map to auth_error."""
+    from ax_cli.runtimes.hermes.runtimes import get_runtime
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test_key")
+
+    fake_model = MagicMock()
+    fake_model.generate_content.side_effect = RuntimeError(
+        "401 Unauthenticated: request missing valid authentication credentials"
+    )
+    _install_fake_genai(monkeypatch, fake_model)
+
+    rt = get_runtime("gemini_sdk")
+    result = rt.execute("hello", workdir="/tmp")
+
+    assert result.exit_reason == "auth_error"
+
+
+def test_gemini_sdk_auth_error_classifier_does_not_swallow_unrelated_errors(monkeypatch):
+    """Regression guard: the auth-error classifier must NOT match unrelated
+    errors that happen to contain digits or substrings. A 500 internal error
+    with no auth-related wording should still be 'crashed', not 'auth_error'."""
+    from ax_cli.runtimes.hermes.runtimes import get_runtime
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test_key")
+
+    fake_model = MagicMock()
+    fake_model.generate_content.side_effect = RuntimeError(
+        "500 Internal Server Error: backend unavailable"
+    )
+    _install_fake_genai(monkeypatch, fake_model)
+
+    rt = get_runtime("gemini_sdk")
+    result = rt.execute("hello", workdir="/tmp")
+
+    assert result.exit_reason == "crashed"
