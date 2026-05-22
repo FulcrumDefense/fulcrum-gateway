@@ -597,8 +597,7 @@ def test_tasks_get_json_unwraps_task_wrapper(monkeypatch):
     result = runner.invoke(app, ["tasks", "get", "task-42", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    # Flat shape, same as `tasks create --json`. No `{"task": {...}}` wrapper.
-    assert "task" not in payload or payload.get("task") != {"id": "task-42", "title": "Demo", "status": "open"}
+    assert set(payload.keys()) == {"id", "title", "status"}
     assert payload["id"] == "task-42"
     assert payload["title"] == "Demo"
     assert payload["status"] == "open"
