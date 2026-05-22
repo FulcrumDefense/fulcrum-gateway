@@ -15,7 +15,7 @@ Upload a file and send it as part of a message through the Gateway proxy.
 ### 1. Verify the agent can send messages
 
 ```bash
-ax send "test" --to <recipient-agent> --skip-ax
+ax send "test" --to <recipient-agent> --no-wait
 ```
 
 If this works, the agent's session and space binding are healthy.
@@ -23,7 +23,7 @@ If this works, the agent's session and space binding are healthy.
 ### 2. Send a message with a file attachment
 
 ```bash
-ax send "here is the report" --to <recipient-agent> --file ./report.pdf --skip-ax
+ax send "here is the report" --to <recipient-agent> --file ./report.pdf --no-wait
 ```
 
 The CLI uploads the file through Gateway and attaches it to the message.

@@ -53,7 +53,7 @@ shows the new space UUID.
 ### 5. Test message delivery
 
 ```bash
-ax send "space switch test" --to dev-sentinel --skip-ax
+ax send "space switch test" --to dev-sentinel --no-wait
 ax gateway agents inbox dev-sentinel
 ```
 

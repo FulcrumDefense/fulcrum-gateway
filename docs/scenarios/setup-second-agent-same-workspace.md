@@ -52,8 +52,8 @@ the platform.
 ### 5. Test independent messaging
 
 ```bash
-ax send "hello from test" --to first-agent --skip-ax
-ax send "hello from test" --to second-agent --skip-ax
+ax send "hello from test" --to first-agent --no-wait
+ax send "hello from test" --to second-agent --no-wait
 
 ax gateway agents inbox first-agent
 ax gateway agents inbox second-agent

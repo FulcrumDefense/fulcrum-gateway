@@ -18,13 +18,7 @@ inconsistent.
 ax gateway stop
 ```
 
-If Gateway won't stop cleanly, try a force stop:
-
-```bash
-ax gateway stop --force
-```
-
-If that still fails, kill the process manually:
+If Gateway won't stop cleanly, kill the process manually:
 
 ```bash
 kill $(cat ~/.ax/gateway/gateway.pid)
@@ -122,7 +116,7 @@ ax gateway agents start dev-sentinel
 Test message delivery:
 
 ```bash
-ax send "recovery test" --to echo-bot --skip-ax
+ax send "recovery test" --to echo-bot --no-wait
 ```
 
 ## Verify
