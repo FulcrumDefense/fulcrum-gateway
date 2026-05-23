@@ -4,6 +4,7 @@
 **Duration:** ~6 minutes
 **Platform:** [https://paxai.app](https://paxai.app) (web UI) plus one terminal for the initial registration
 **Template:** `autogen` (Gateway-managed AutoGen bridge, see PR #72 / `examples/gateway_autogen/autogen_bridge.py`)
+**Branch:** `feat/autogen-template-bridge` (required until PR #72 is on main)
 
 ---
 
@@ -21,19 +22,26 @@ uv pip install autogen-agentchat 'autogen-ext[openai]'
 # 3. Confirm GROQ_API_KEY is set
 echo "$GROQ_API_KEY" | head -c 4   # should print: gsk_
 
-# 4. Register the AutoGen agent
+# 4. Make sure Gateway is logged in and running
+ax gateway login              # only if not already logged in
+ax gateway start              # only if the daemon isn't already running
+ax gateway status             # should show daemon.running=true, healthy
+
+# 5. Register the AutoGen agent
 ax gateway agents add --template autogen --name autogen-demo
 ax gateway agents start autogen-demo
 ax gateway agents show autogen-demo
-# Presence should be IDLE, Reachability ready to claim work
+# Reachability should read "Gateway can launch this runtime on send"
+# (AutoGen is exec / launch-on-send, not a live listener. The bridge runs
+# as a subprocess each time a mention arrives.)
 
-# 5. Smoke test from terminal
+# 6. Smoke test from terminal
 AX_GATEWAY_AGENT_NAME=autogen-demo \
 AX_MENTION_CONTENT="Reply in one short sentence, what is the speed of light in km/s?" \
 .venv/bin/python examples/gateway_autogen/autogen_bridge.py
 # Should reply with the speed of light and exit_reason=done
 
-# 6. Send a UI smoke test to make sure the agent shows up in the workspace
+# 7. Send a UI smoke test to make sure the agent shows up in the workspace
 ax send "@autogen-demo Reply briefly, are you live" --space ax-gateway
 # Should reply within a few seconds
 ```
@@ -122,6 +130,12 @@ few seconds more.
 
 ### Step 4. Compare to a sibling template (1 min, optional)
 
+**Skip this step if no sibling template is registered in the workspace.**
+This comparison only lands when `@langgraph-bot` (or a similar
+`@hermes-bot`) is already live alongside the AutoGen agent. The point
+is operator-experience parity across frameworks, so if no sibling
+exists yet the demo still stands on its own with Steps 1 to 3.
+
 If a LangGraph or Hermes agent is already registered in the workspace,
 mention it with the same prompt.
 
@@ -195,7 +209,8 @@ Each one is a clear next-step PR.
 | Bridge replies with `AutoGen stub ack from ...` instead of a real answer | GROQ_API_KEY not set, or autogen-ext missing | Check `echo $GROQ_API_KEY` returns a value; if it does, reinstall autogen-ext |
 | Bridge replies with `AutoGen bridge for ... finished without text` | Model returned empty content (rare, model-side glitch) | Send the prompt again, or switch model via `AX_BRIDGE_LLM_MODEL` |
 | `exit_reason=crashed` with "Agent could not start..." | autogen-agentchat itself not installed | `uv pip install autogen-agentchat` |
-| Long pause with no activity events | Groq rate limit or network stall | Check `ax gateway activity` for the agent, may need to wait 30s and retry |
+| Long pause with no activity events | Groq rate limit or network stall | `ax gateway activity --agent autogen-demo` to see what the bridge emitted; may need to wait 30s and retry |
+| Agent does not show up in workspace participant list | Agent registered but Gateway daemon not running | `ax gateway status` to confirm `daemon.running=true`, then `ax gateway start` if needed |
 
 ---
 
