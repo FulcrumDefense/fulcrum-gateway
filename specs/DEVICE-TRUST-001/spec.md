@@ -229,3 +229,181 @@ Recommended backend behavior:
 - Agent PAT mint requests include issuer device id.
 - Device revocation blocks future device-authenticated exchanges.
 - Agents cannot request user bootstrap token material through CLI, MCP, or API.
+
+## Open Questions
+
+The following questions an implementer would need answered to move this spec
+from **Draft** to **Accepted**. Each is a place to land a decision (or surface
+a counter-question) inline; reviewers should feel free to answer in-thread on
+the corresponding line.
+
+Surfaced during a review on 2026-05-24, prompted by the containerized-agent
+trust work in #87 / #89 / #90 / #91 where this spec was identified as the
+strategic destination.
+
+### 1. Device enrollment mechanism
+
+**Question:** How does a fresh device obtain its public-key registration with
+the backend?
+
+**Why it matters:** The spec says *"`axctl init` enrolls a device from a valid
+bootstrap token"* and then assumes the device is enrolled for the rest. The
+entire trust model rests on this step. Without a defined flow there is no v1.
+
+**Sub-questions:**
+- Where is the keypair generated? (Locally in axctl? Hardware-backed where
+  available?)
+- What does the enrollment HTTP request look like? (`POST /api/v1/devices` with
+  a CSR-like payload?)
+- Does the bootstrap token get *exchanged for* a device credential, or do they
+  coexist for a period?
+- Is enrollment interactive (waits for UI approval) or asynchronous (returns
+  pending, CLI polls)?
+
+### 2. "Device credential" needs a single definition
+
+**Question:** What is a "device credential," concretely?
+
+**Why it matters:** The term appears in multiple places with seemingly
+different meanings:
+
+- Line 170: v1 may use *"a device credential plus existing JWT exchange"* — sounds like a static credential.
+- Line 219 (threats table): *"Device credential copied from disk"* — confirms it lives on disk.
+- The Request Signing section (line 156): all device-authenticated requests are signed with the private key — sounds like the *key itself* is the credential.
+
+Is the device credential:
+
+- (a) A static API token bound to a device id?
+- (b) A JWT minted from a signed challenge at session start?
+- (c) The private key itself, used to sign each request directly?
+- (d) Some combination phased over v1 → v2?
+
+These have very different storage, replay, and rotation implications.
+
+### 3. Private-key storage on headless Linux
+
+**Question:** What is the v1 answer for private-key storage on platforms
+without an OS keychain — headless Linux servers, CI runners, containers
+without a session D-Bus?
+
+**Why it matters:** Line 219 mentions *"OS keychain, future hardware keys"*
+as the mitigation against on-disk credential copying. Mac Keychain, Windows
+Credential Manager, and `libsecret` cover desktop cases. Headless Linux
+(the most common ax-gateway server deployment, and exactly the
+containerized-agent case in #87) has none of these by default.
+
+Options:
+- (a) Plain on-disk file with mode 0600 in `~/.ax/device/` — pragmatic, but
+  exactly the threat row #2 of the threats table flags.
+- (b) Require a user-supplied passphrase to unlock the key on each axctl
+  invocation — security win, UX loss.
+- (c) Defer the headless case; only ship v1 to platforms with a keychain.
+  Leaves the most common deployment shape unaddressed.
+- (d) Allow a pluggable backend (env-driven: `AX_DEVICE_KEY_PROVIDER=file|libsecret|...`)
+  and ship a sensible default per platform.
+
+This question directly determines whether DEVICE-TRUST-001 helps the
+containerized-agent setup that prompted this review (#87), or whether
+that case needs an orthogonal solution.
+
+### 4. Backwards compatibility and migration
+
+**Question:** How do existing `axp_u_*` user PATs and existing axctl installs
+continue to work as DEVICE-TRUST-001 rolls out?
+
+**Why it matters:** There is an installed base of `axctl` users. A flag-day
+cutover is hostile; a coexistence window needs explicit rules.
+
+Sub-questions:
+- Do existing user PATs continue to authenticate indefinitely, or get
+  end-of-lifed on a date?
+- During coexistence, are device-authenticated requests *preferred* over
+  PAT-authenticated requests for the same operation?
+- Is there a migration command (`axctl device enroll --from-pat`)?
+- What's the operator-visible signal that they should migrate?
+
+### 5. Header naming conflict with existing fingerprinting
+
+**Question:** How do the proposed `X-AX-Device-*` headers relate to the
+existing `X-AX-FP-*` fingerprint headers in `docs/credential-security.md`?
+
+**Why it matters:** The codebase already uses `X-AX-FP-*` for the
+workdir+hostname+OS-user fingerprint sent on every request. If
+`X-AX-Device-*` is purely additive, we have two parallel systems. If it
+replaces `X-AX-FP-*`, that's a wire-compat change worth calling out.
+
+Options:
+- (a) Coexist: device headers prove possession; fingerprint headers stay for
+  anomaly detection.
+- (b) Subsume: device fingerprint replaces the workdir-derived fingerprint;
+  delete `X-AX-FP-*` over a deprecation window.
+- (c) Rename `X-AX-FP-*` to `X-AX-Workdir-*` to disambiguate, keep both.
+
+### 6. `mint_agent_pat` capability mechanism
+
+**Question:** Where is the `mint_agent_pat` capability set, and what is its
+default state?
+
+**Why it matters:** Line 44 lists `capabilities` as a device-record field with
+`mint_agent_pat` as an example. The Approval UI section (line 101) shows a
+toggle. The backend semantics aren't spelled out.
+
+Sub-questions:
+- Is the capability granted per-device, or inherited from the user's policy?
+- Default state for a freshly-enrolled device: granted or pending?
+- Can a non-admin user toggle it on their own devices, or is it admin-only?
+- Does revoking the capability affect already-issued agent PATs, or only
+  future mints?
+
+### 7. CLI UX flow
+
+**Question:** What does the operator see and type during enrollment, the
+pending-approval window, and a fingerprint change?
+
+**Why it matters:** The spec shows UI mockups for paxai.app but no axctl CLI
+sequences. axctl is the primary surface for the operators implementing this.
+
+Concrete sequences worth specifying:
+- First-time enrollment from a clean machine
+- Enrollment while approval is pending (block? print URL? poll?)
+- Re-keying after a private-key compromise
+- Operator-initiated revocation of their own device
+- Fingerprint change after a workstation reinstall
+
+### 8. Implementation ownership and phasing
+
+**Question:** Who implements this, and in what order?
+
+**Why it matters:** The spec is backend-heavy. Without a paxai.app team commit
+the CLI work can't land in a useful way. Without a phasing plan, reviewers
+can't tell what lands first and what depends on what.
+
+Suggested phasing:
+- Phase 1: device record schema + enrollment endpoint + on-disk credential
+  storage (pragmatic v1, accepts on-disk threat).
+- Phase 2: approval UI, audit events, capability policy.
+- Phase 3: request signing, replay prevention, anomaly detection on
+  fingerprint mismatch.
+- Phase 4: hardware-key / OS-keychain integration where available.
+
+This is one possible phasing — it would be useful to converge on *a* plan,
+not necessarily this one.
+
+---
+
+### Stepping-stone considered, rejected
+
+A narrowly-scoped one-time `axp_boot_*` "mint-only" token (single-use, ~10min
+TTL, scoped to one agent name in one space) was considered as an interim
+mitigation for the containerized-agent trust gap in #87. Decision: **do not
+ship it as a separate feature.**
+
+Reasoning: it would be a fourth credential type alongside user PATs, agent
+PATs, and (incoming) device credentials. It would get strictly subsumed once
+DEVICE-TRUST-001 lands — device-signed scoped tokens are better than static
+scoped tokens. And shipping it risks reducing urgency on the real fix.
+
+What got shipped instead as the lowest-effort partial mitigation: #87 (the
+`--no-persist` flag on `ax gateway login`), which shrinks the user-PAT-on-disk
+window from 24h to "the few seconds between login and the next mint" without
+introducing a new credential class.
