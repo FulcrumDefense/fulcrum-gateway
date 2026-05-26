@@ -2048,7 +2048,14 @@ def test_gateway_agent_channel_defaults_returns_empty_for_unknown_agent(monkeypa
     assert result == {}
 
 
-def test_gateway_agent_channel_defaults_returns_entry_fields(monkeypatch):
+def test_gateway_agent_channel_defaults_returns_entry_fields(monkeypatch, tmp_path):
+    # #89: AX_TOKEN_FILE must be a resolved absolute path the child process
+    # can actually read, not the raw registry string. Seed the token where
+    # the helper will resolve to under AX_GATEWAY_DIR.
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    token_path = tmp_path / "gw" / "agents" / "orion" / "token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("axp_a_x.y\n")
     monkeypatch.setattr(
         gateway_core,
         "load_gateway_registry",
@@ -2059,7 +2066,7 @@ def test_gateway_agent_channel_defaults_returns_entry_fields(monkeypatch):
                     "agent_id": "agent-123",
                     "space_id": "space-1",
                     "base_url": "https://paxai.app",
-                    "token_file": "/tmp/token",
+                    "token_file": "agents/orion/token",  # new relative format
                     "workdir": "/tmp/work",
                 }
             ]
@@ -2069,7 +2076,7 @@ def test_gateway_agent_channel_defaults_returns_entry_fields(monkeypatch):
     assert result["AX_AGENT_NAME"] == "orion"
     assert result["AX_AGENT_ID"] == "agent-123"
     assert result["AX_SPACE_ID"] == "space-1"
-    assert result["AX_TOKEN_FILE"] == "/tmp/token"
+    assert result["AX_TOKEN_FILE"] == str(token_path)
 
 
 # ---- _write_gateway_cli_config ----

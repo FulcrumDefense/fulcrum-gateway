@@ -1380,7 +1380,10 @@ def _register_managed_agent(
         "workdir": workdir,
         "ollama_model": normalized_ollama_model,
         "timeout_seconds": timeout_effective,
-        "token_file": str(token_file),
+        # Store relative to gateway_dir() so the registry travels cleanly
+        # between hosts/containers (#89). Resolved via
+        # gateway.resolve_managed_agent_token_path at read sites.
+        "token_file": f"agents/{name}/token",
         "desired_state": "running" if start else "stopped",
         "effective_state": "stopped",
         "transport": "gateway",

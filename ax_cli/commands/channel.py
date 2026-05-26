@@ -106,8 +106,11 @@ def _gateway_agent_channel_defaults(agent_name: str) -> dict[str, str]:
     entry = gateway_core.find_agent_entry(registry, agent_name)
     if not entry:
         return {}
+    token_file_value = (
+        str(gateway_core.resolve_managed_agent_token_path(entry)) if str(entry.get("token_file") or "").strip() else ""
+    )
     return {
-        "AX_TOKEN_FILE": str(entry.get("token_file") or ""),
+        "AX_TOKEN_FILE": token_file_value,
         "AX_BASE_URL": str(entry.get("base_url") or ""),
         "AX_AGENT_NAME": str(entry.get("name") or agent_name),
         "AX_AGENT_ID": str(entry.get("agent_id") or ""),

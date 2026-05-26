@@ -22,6 +22,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2020,7 +2021,11 @@ def ensure_gateway_identity_binding(
             "display": "Gateway-managed agent token"
             if str(entry.get("credential_source") or "gateway") == "gateway"
             else "Non-gateway credential",
-            "path_redacted": _redacted_path(entry.get("token_file")),
+            "path_redacted": (
+                _redacted_path(str(resolve_managed_agent_token_path(entry)))
+                if str(entry.get("token_file") or "").strip()
+                else None
+            ),
         },
         "active_space_id": active_space_id,
         "active_space_name": active_space_name or None,
@@ -3049,9 +3054,61 @@ def agent_token_path(name: str) -> Path:
     return agent_dir(name) / "token"
 
 
+_legacy_token_path_warned: set[str] = set()
+
+
+def resolve_managed_agent_token_path(entry: dict[str, Any]) -> Path:
+    """Resolve a managed-agent token file from its registry entry.
+
+    Stored format since #89 is a path relative to ``gateway_dir()`` —
+    typically ``agents/<name>/token`` — so a registry minted on one
+    host (Mac, machine A) opens cleanly on another (Linux container,
+    machine B) as long as the gateway state dir is mounted at the
+    same logical location on both. Pre-existing entries may carry an
+    absolute path from before this fix; we accept those when they
+    resolve and otherwise fall back to the canonical
+    ``gateway_dir() / agents / <name> / token`` shape derived from
+    ``entry["name"]`` (with a one-shot warning so the operator knows
+    their registry has stale absolute paths worth migrating).
+    """
+    raw = str(entry.get("token_file") or "").strip()
+    name = str(entry.get("name") or "").strip()
+    if raw:
+        # os.path.isabs (not Path.is_absolute) so a Mac-minted ``/Users/...``
+        # path is still recognized as "looks-absolute" when the registry is
+        # loaded on Windows, instead of being silently joined under
+        # gateway_dir() as if it were relative.
+        if os.path.isabs(raw):
+            candidate = Path(raw).expanduser()
+            if candidate.exists():
+                return candidate
+            if name:
+                derived = agent_token_path(name)
+                if raw not in _legacy_token_path_warned:
+                    _legacy_token_path_warned.add(raw)
+                    try:
+                        print(
+                            f"WARNING: registry entry for {name!r} has stale absolute "
+                            f"token_file {raw!s} (not found); using {derived!s} instead. "
+                            "Re-add the agent or trim the registry to migrate.",
+                            file=sys.stderr,
+                        )
+                    except OSError:
+                        pass
+                return derived
+            # No name to fall back on — keep the candidate so the caller's
+            # "missing" error still surfaces the path the operator configured.
+            return candidate
+        else:
+            return (gateway_dir() / raw).expanduser()
+    if name:
+        return agent_token_path(name)
+    return Path("")
+
+
 def load_gateway_managed_agent_token(entry: dict[str, Any]) -> str:
     """Read a Gateway-managed runtime token and reject bootstrap credentials."""
-    token_file = Path(str(entry.get("token_file") or "")).expanduser()
+    token_file = resolve_managed_agent_token_path(entry)
     if not token_file.exists():
         raise ValueError(f"Gateway-managed token file is missing: {token_file}")
     token = token_file.read_text().strip()
@@ -3914,7 +3971,7 @@ def sanitize_exec_env(prompt: str, entry: dict[str, Any]) -> dict[str, str]:
         # Validate the bound credential without placing the secret in the child
         # process environment. Bridges read AX_TOKEN_FILE when they need to call aX.
         load_gateway_managed_agent_token(entry)
-        env["AX_TOKEN_FILE"] = token_file
+        env["AX_TOKEN_FILE"] = str(resolve_managed_agent_token_path(entry))
     base_url = str(entry.get("base_url") or "").strip()
     if base_url:
         env["AX_BASE_URL"] = base_url
@@ -4864,7 +4921,7 @@ class ManagedAgentRuntime:
 
     @property
     def token_file(self) -> Path:
-        return Path(str(self.entry.get("token_file") or "")).expanduser()
+        return resolve_managed_agent_token_path(self.entry)
 
     def _log(self, message: str) -> None:
         self.logger(f"{self.name}: {message}")

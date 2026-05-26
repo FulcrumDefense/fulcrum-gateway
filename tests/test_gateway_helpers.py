@@ -2126,6 +2126,110 @@ class TestLoadGatewayManagedAgentToken:
             load_gateway_managed_agent_token(entry)
 
 
+class TestResolveManagedAgentTokenPath:
+    """resolve_managed_agent_token_path: portability fix for #89.
+
+    Stored ``token_file`` is now a path relative to ``gateway_dir()`` so the
+    registry travels cleanly across hosts/containers. Legacy entries with
+    absolute paths must keep working when reachable, and fall back to the
+    canonical name-derived shape when the absolute path no longer resolves
+    (cross-host scenario).
+    """
+
+    def test_relative_path_resolves_under_gateway_dir(self, monkeypatch, tmp_path):
+        from ax_cli.gateway import resolve_managed_agent_token_path
+
+        gw_dir = tmp_path / "gw"
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(gw_dir))
+        entry = {"name": "alice", "token_file": "agents/alice/token"}
+
+        result = resolve_managed_agent_token_path(entry)
+
+        assert result == gw_dir / "agents" / "alice" / "token"
+
+    def test_absolute_path_used_when_it_exists(self, monkeypatch, tmp_path):
+        from ax_cli.gateway import resolve_managed_agent_token_path
+
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+        external = tmp_path / "external-token"
+        external.write_text("axp_a_x.y\n")
+        entry = {"name": "alice", "token_file": str(external)}
+
+        result = resolve_managed_agent_token_path(entry)
+
+        assert result == external
+
+    def test_absent_absolute_falls_back_to_derived(self, monkeypatch, tmp_path, capsys):
+        """Cross-host scenario: registry from host A has absolute path
+        ``/Users/foo/...`` that doesn't exist on host B, but the token IS
+        present at the canonical ``gateway_dir()/agents/<name>/token``."""
+        from ax_cli import gateway as gw_mod
+        from ax_cli.gateway import resolve_managed_agent_token_path
+
+        gw_dir = tmp_path / "gw"
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(gw_dir))
+        # Seed the canonical location.
+        canonical = gw_dir / "agents" / "alice" / "token"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("axp_a_x.y\n")
+        # The stale absolute path from a foreign host.
+        stale = "/Users/claude/some/foreign/host/agents/alice/token"
+        entry = {"name": "alice", "token_file": stale}
+
+        # Clear the warning guard so this test's warning is observable.
+        gw_mod._legacy_token_path_warned.discard(stale)
+
+        result = resolve_managed_agent_token_path(entry)
+
+        assert result == canonical
+        err = capsys.readouterr().err
+        assert "stale absolute token_file" in err
+        assert "alice" in err
+
+    def test_warning_emitted_once_per_stale_path(self, monkeypatch, tmp_path, capsys):
+        from ax_cli import gateway as gw_mod
+        from ax_cli.gateway import resolve_managed_agent_token_path
+
+        gw_dir = tmp_path / "gw"
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(gw_dir))
+        canonical = gw_dir / "agents" / "alice" / "token"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("axp_a_x.y\n")
+        stale = "/Users/claude/foreign/agents/alice/token"
+        entry = {"name": "alice", "token_file": stale}
+        gw_mod._legacy_token_path_warned.discard(stale)
+
+        resolve_managed_agent_token_path(entry)
+        resolve_managed_agent_token_path(entry)
+
+        err = capsys.readouterr().err
+        # Exactly one WARNING line, not two.
+        assert err.count("stale absolute token_file") == 1
+
+    def test_empty_token_file_with_name_derives(self, monkeypatch, tmp_path):
+        from ax_cli.gateway import resolve_managed_agent_token_path
+
+        gw_dir = tmp_path / "gw"
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(gw_dir))
+        entry = {"name": "alice", "token_file": ""}
+
+        result = resolve_managed_agent_token_path(entry)
+
+        assert result == gw_dir / "agents" / "alice" / "token"
+
+    def test_no_name_no_token_file_returns_empty(self, monkeypatch, tmp_path):
+        from ax_cli.gateway import resolve_managed_agent_token_path
+
+        monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+        entry: dict = {}
+
+        result = resolve_managed_agent_token_path(entry)
+
+        # Path("") stringifies to "." — what matters here is that callers
+        # treat the result as "no file configured" and don't try to read it.
+        assert result == Path("")
+
+
 class TestFormatDaemonLogLine:
     """_format_daemon_log_line: prepends ISO timestamp to a log line."""
 
