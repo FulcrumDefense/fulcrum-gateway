@@ -58,7 +58,7 @@ _EXAMPLES_DIR = os.path.join(
 if _EXAMPLES_DIR not in sys.path:
     sys.path.insert(0, _EXAMPLES_DIR)
 
-import langgraph_bridge  # noqa: E402
+import langgraph_bridge  # noqa: E402, I001
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -105,17 +105,20 @@ def test_max_iterations_invalid_value_falls_back(monkeypatch):
 # ── 2 + 3. Env-var parsing for tools-disabled and strict-security ────────
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("1", True),
-    ("true", True),
-    ("yes", True),
-    ("on", True),
-    ("TRUE", True),
-    ("0", False),
-    ("false", False),
-    ("", False),
-    ("nope", False),
-])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("TRUE", True),
+        ("0", False),
+        ("false", False),
+        ("", False),
+        ("nope", False),
+    ],
+)
 def test_tools_disabled_env(monkeypatch, value, expected):
     monkeypatch.setenv("AX_BRIDGE_TOOLS_DISABLED", value)
     assert langgraph_bridge._tools_disabled() is expected
@@ -126,15 +129,18 @@ def test_tools_disabled_unset(monkeypatch):
     assert langgraph_bridge._tools_disabled() is False
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("1", True),
-    ("true", True),
-    ("yes", True),
-    ("on", True),
-    ("0", False),
-    ("false", False),
-    ("", False),
-])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("", False),
+    ],
+)
 def test_strict_security_env(monkeypatch, value, expected):
     monkeypatch.setenv("AX_BRIDGE_STRICT_SECURITY", value)
     assert langgraph_bridge._strict_security() is expected
@@ -355,9 +361,7 @@ def test_toolnode_with_security_wrap_intercepts_blocked_write(monkeypatch, tmp_p
     content = getattr(rejection, "content", "")
     assert "Write denied" in content or "error" in content.lower()
     # Critical: the underlying tool function must NOT have run
-    assert sentinel_fired["value"] is False, (
-        "Security wrapper failed to intercept: write_file actually executed"
-    )
+    assert sentinel_fired["value"] is False, "Security wrapper failed to intercept: write_file actually executed"
 
 
 def test_toolnode_with_security_wrap_passes_through_allowed_call(monkeypatch, tmp_path):
