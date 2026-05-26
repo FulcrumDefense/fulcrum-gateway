@@ -269,7 +269,7 @@ def main() -> int:
             },
         }
     )
-    print(result.reply or f"LangGraph bridge for @{_agent_name()} finished without text.")
+    print(result.reply or f"LangGraph bridge for @{_agent_name()} finished without text.", flush=True)
     return 0
 
 
