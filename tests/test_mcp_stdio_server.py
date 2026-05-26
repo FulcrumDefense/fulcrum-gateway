@@ -51,14 +51,16 @@ def test_initialize_returns_protocol_and_server_info(capsys):
 
 
 def test_tools_list_returns_registered_tools(capsys):
-    config = _make_config(tools=[
-        ToolSpec(
-            name="echo",
-            description="Echo back",
-            input_schema={"type": "object", "properties": {"text": {"type": "string"}}},
-            handler=lambda args: {"content": [{"type": "text", "text": args.get("text", "")}]},
-        ),
-    ])
+    config = _make_config(
+        tools=[
+            ToolSpec(
+                name="echo",
+                description="Echo back",
+                input_schema={"type": "object", "properties": {"text": {"type": "string"}}},
+                handler=lambda args: {"content": [{"type": "text", "text": args.get("text", "")}]},
+            ),
+        ]
+    )
     responses = _drive(config, [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}], capsys)
     tools = responses[0]["result"]["tools"]
     assert len(tools) == 1
@@ -67,18 +69,19 @@ def test_tools_list_returns_registered_tools(capsys):
 
 
 def test_tool_call_dispatches_to_handler(capsys):
-    config = _make_config(tools=[
-        ToolSpec(
-            name="echo",
-            description="",
-            input_schema={"type": "object"},
-            handler=lambda args: {"content": [{"type": "text", "text": f"got: {args.get('text')}"}]},
-        ),
-    ])
+    config = _make_config(
+        tools=[
+            ToolSpec(
+                name="echo",
+                description="",
+                input_schema={"type": "object"},
+                handler=lambda args: {"content": [{"type": "text", "text": f"got: {args.get('text')}"}]},
+            ),
+        ]
+    )
     responses = _drive(
         config,
-        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-          "params": {"name": "echo", "arguments": {"text": "hi"}}}],
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "hi"}}}],
         capsys,
     )
     assert responses[0]["result"]["content"][0]["text"] == "got: hi"
@@ -87,8 +90,7 @@ def test_tool_call_dispatches_to_handler(capsys):
 def test_unknown_tool_returns_method_not_found_error(capsys):
     responses = _drive(
         _make_config(),
-        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-          "params": {"name": "no_such_tool", "arguments": {}}}],
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "no_such_tool", "arguments": {}}}],
         capsys,
     )
     assert "error" in responses[0]
@@ -100,13 +102,14 @@ def test_handler_exception_returned_as_iserror_text(capsys):
     def _boom(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("kaboom")
 
-    config = _make_config(tools=[
-        ToolSpec(name="bad", description="", input_schema={"type": "object"}, handler=_boom),
-    ])
+    config = _make_config(
+        tools=[
+            ToolSpec(name="bad", description="", input_schema={"type": "object"}, handler=_boom),
+        ]
+    )
     responses = _drive(
         config,
-        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-          "params": {"name": "bad", "arguments": {}}}],
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bad", "arguments": {}}}],
         capsys,
     )
     result = responses[0]["result"]
@@ -143,11 +146,14 @@ def test_ping_returns_empty_result(capsys):
     assert responses[0]["result"] == {}
 
 
-@pytest.mark.parametrize("method,result_key", [
-    ("resources/list", "resources"),
-    ("resources/templates/list", "resourceTemplates"),
-    ("prompts/list", "prompts"),
-])
+@pytest.mark.parametrize(
+    "method,result_key",
+    [
+        ("resources/list", "resources"),
+        ("resources/templates/list", "resourceTemplates"),
+        ("prompts/list", "prompts"),
+    ],
+)
 def test_empty_list_endpoints(capsys, method, result_key):
     responses = _drive(_make_config(), [{"jsonrpc": "2.0", "id": 1, "method": method}], capsys)
     assert responses[0]["result"] == {result_key: []}

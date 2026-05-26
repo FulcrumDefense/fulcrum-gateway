@@ -9,11 +9,10 @@ import pytest
 # sqlglot is gated behind the [mcp] optional-extra; tests need it.
 sqlglot = pytest.importorskip("sqlglot")
 
-from ax_cli.runtimes.mcp_servers.report_gen.synthetic_db import (
-    ensure_database,
+from ax_cli.runtimes.mcp_servers.report_gen.synthetic_db import (  # noqa: E402
     seed_database,
 )
-from ax_cli.runtimes.mcp_servers.report_gen.tools import (
+from ax_cli.runtimes.mcp_servers.report_gen.tools import (  # noqa: E402
     ReadOnlyViolation,
     _check_sql_readonly,
     _handle_db_query,
@@ -30,6 +29,7 @@ def isolated_db(tmp_path_factory, monkeypatch_session=None):
     # Module-scoped monkeypatch can't use the function-scoped fixture; do it
     # manually with os.environ + cleanup.
     import os
+
     tmp = tmp_path_factory.mktemp("report_gen")
     db_path = tmp / "synthetic.db"
     prior = os.environ.get("AX_REPORT_GEN_DB_PATH")
@@ -52,19 +52,14 @@ def test_get_db_schema_returns_all_five_tables():
     schema = get_db_schema()
     assert schema["synthetic"] is True
     table_names = {t["name"] for t in schema["tables"]}
-    assert table_names == {
-        "theater", "unit", "ammo_stockpile", "personnel_readiness", "supply_route"
-    }
+    assert table_names == {"theater", "unit", "ammo_stockpile", "personnel_readiness", "supply_route"}
 
 
 def test_get_db_schema_includes_foreign_keys():
     schema = get_db_schema()
     by_name = {t["name"]: t for t in schema["tables"]}
     fk = by_name["ammo_stockpile"]["foreign_keys"]
-    assert any(
-        f["column"] == "theater_id" and f["references_table"] == "theater"
-        for f in fk
-    )
+    assert any(f["column"] == "theater_id" and f["references_table"] == "theater" for f in fk)
 
 
 def test_get_db_schema_reports_row_counts():
@@ -115,14 +110,17 @@ def test_run_query_row_limit_not_triggered_when_below():
 # --- SQL safety: AST layer (sqlglot) ---
 
 
-@pytest.mark.parametrize("sql", [
-    "DELETE FROM theater WHERE id = 1",
-    "UPDATE theater SET name = 'X' WHERE id = 1",
-    "INSERT INTO theater (id, name) VALUES (99, 'NEWCOM')",
-    "DROP TABLE theater",
-    "CREATE TABLE foo (id INTEGER)",
-    "ALTER TABLE theater ADD COLUMN evil TEXT",
-])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DELETE FROM theater WHERE id = 1",
+        "UPDATE theater SET name = 'X' WHERE id = 1",
+        "INSERT INTO theater (id, name) VALUES (99, 'NEWCOM')",
+        "DROP TABLE theater",
+        "CREATE TABLE foo (id INTEGER)",
+        "ALTER TABLE theater ADD COLUMN evil TEXT",
+    ],
+)
 def test_check_sql_readonly_rejects_writes(sql):
     with pytest.raises(ReadOnlyViolation):
         _check_sql_readonly(sql)
@@ -172,9 +170,7 @@ def test_run_query_returns_readonly_violation_code():
 
 
 def test_run_query_rejects_cte_smuggled_delete_via_error_code():
-    result = run_query(
-        "WITH x AS (DELETE FROM theater WHERE id = 1 RETURNING *) SELECT * FROM x"
-    )
+    result = run_query("WITH x AS (DELETE FROM theater WHERE id = 1 RETURNING *) SELECT * FROM x")
     assert result["code"] == "READONLY_VIOLATION"
 
 
@@ -183,8 +179,10 @@ def test_run_query_rejects_cte_smuggled_delete_via_error_code():
 
 def test_connection_level_readonly_blocks_writes_even_if_ast_bypassed():
     """If somehow the AST check missed a write, SQLite still refuses."""
-    from ax_cli.runtimes.mcp_servers.report_gen.synthetic_db import open_readonly, default_db_path
     import sqlite3
+
+    from ax_cli.runtimes.mcp_servers.report_gen.synthetic_db import default_db_path, open_readonly
+
     conn = open_readonly(default_db_path())
     try:
         with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
@@ -205,9 +203,7 @@ def test_db_schema_handler_returns_mcp_content_block():
 
 
 def test_db_query_handler_returns_mcp_content_block():
-    result = _handle_db_query(
-        {"sql": "SELECT name FROM theater WHERE name = 'CENTCOM'"}
-    )
+    result = _handle_db_query({"sql": "SELECT name FROM theater WHERE name = 'CENTCOM'"})
     payload = json.loads(result["content"][0]["text"])
     assert payload["row_count"] == 1
     assert payload["rows"][0]["name"] == "CENTCOM"
