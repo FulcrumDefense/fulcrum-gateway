@@ -18,6 +18,46 @@ def _gateway_setup_skill_path() -> Path:
     return _repo_root() / "skills" / "gateway-agent-setup" / "SKILL.md"
 
 
+def _bridge_python() -> str:
+    """Return the Python interpreter path Gateway should use for exec-bridge agents.
+
+    Prefers the project's virtualenv (`.venv/bin/python` on POSIX,
+    `.venv/Scripts/python.exe` on Windows) over the bare `python3` from PATH.
+    The virtualenv is where the bridge's optional deps live (langgraph,
+    langchain-core, langchain-groq, etc.); the system `python3` typically
+    doesn't have them, so a bare `python3` invocation silently degrades the
+    bridge to its string-fallback tier (see PM artifact #183 LangGraph survey
+    + the project memory `project_gateway_exec_bridge_env_pitfalls` for the
+    full story).
+
+    Falls back to `python3` when no venv is found at the expected paths, so
+    operators who don't use a venv (or who run the bridges out of a system
+    site-packages install) still get a working command.
+
+    Returns a string suitable for embedding in an `exec_command` template.
+    Absolute paths are preferred over relative paths because Gateway
+    resolves `exec_command` from the agent's `workdir`, which may differ
+    from the repo root in advanced configurations.
+    """
+    import sys
+
+    repo_root = _repo_root()
+    # POSIX venv layout
+    posix_venv = repo_root / ".venv" / "bin" / "python"
+    # Windows venv layout
+    win_venv = repo_root / ".venv" / "Scripts" / "python.exe"
+    for candidate in (posix_venv, win_venv):
+        if candidate.is_file():
+            return str(candidate)
+    # No venv found. Use the current interpreter if it looks venv-shaped
+    # (e.g. we're running under the `ax` console script from a venv install
+    # not at .venv but at some other path the user picked).
+    current = Path(sys.executable)
+    if ".venv" in current.parts or "venv" in current.parts:
+        return str(current)
+    return "python3"
+
+
 def _shared_signals() -> dict[str, str]:
     return {
         "delivery": "Gateway confirms when a message was queued or claimed.",
@@ -348,7 +388,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "setup_skill_path": str(skill_path),
             "defaults": {
                 "runtime_type": "exec",
-                "exec_command": "python3 examples/gateway_ollama/ollama_bridge.py",
+                "exec_command": f"{_bridge_python()} {repo_root / 'examples' / 'gateway_ollama' / 'ollama_bridge.py'}",
                 "workdir": str(repo_root),
             },
             "signals": runtime_signals["exec"],
@@ -380,7 +420,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "setup_skill_path": str(skill_path),
             "defaults": {
                 "runtime_type": "exec",
-                "exec_command": "python3 examples/gateway_langgraph/langgraph_bridge.py",
+                "exec_command": f"{_bridge_python()} {repo_root / 'examples' / 'gateway_langgraph' / 'langgraph_bridge.py'}",
                 "workdir": str(repo_root),
             },
             "signals": runtime_signals["exec"],
@@ -454,7 +494,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "setup_skill_path": str(skill_path),
             "defaults": {
                 "runtime_type": "exec",
-                "exec_command": "python3 examples/gateway_strands/strands_bridge.py",
+                "exec_command": f"{_bridge_python()} {repo_root / 'examples' / 'gateway_strands' / 'strands_bridge.py'}",
                 "workdir": str(repo_root),
             },
             "signals": runtime_signals["exec"],
