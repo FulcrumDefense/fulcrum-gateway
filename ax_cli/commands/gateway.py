@@ -1277,13 +1277,9 @@ def _normalize_connector_ref(connector_ref: str) -> str:
     try:
         row = find_connector(ref)
     except ConnectorNotFoundError as exc:
-        raise ValueError(
-            f"Connector not found: {ref!r}. Run: ax gateway connectors list"
-        ) from exc
+        raise ValueError(f"Connector not found: {ref!r}. Run: ax gateway connectors list") from exc
     if not row.enabled:
-        raise ValueError(
-            f"Connector {row.name!r} is disabled. Run: ax gateway connectors enable {row.name}"
-        )
+        raise ValueError(f"Connector {row.name!r} is disabled. Run: ax gateway connectors enable {row.name}")
     return row.name
 
 
