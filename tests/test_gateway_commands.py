@@ -7171,9 +7171,7 @@ def test_save_registry_preserves_other_writer_row_deletion(monkeypatch, tmp_path
 
     final = gateway_core.load_gateway_registry()
     names = {a["name"] for a in final["agents"]}
-    assert names == {"incumbent"}, (
-        "to-remove was resurrected by daemon save — registry remove race regressed (#42)"
-    )
+    assert names == {"incumbent"}, "to-remove was resurrected by daemon save — registry remove race regressed (#42)"
     # Daemon's effective_state update on the incumbent should still apply.
     incumbent = next(a for a in final["agents"] if a["name"] == "incumbent")
     assert incumbent["effective_state"] == "running"
@@ -9041,6 +9039,8 @@ def test_gateway_local_connect_404_uses_actionable_guidance(monkeypatch):
     assert "@wishy" in msg
     assert "Live Listener" in msg
     assert "ax gateway local connect wishy --workdir /repo" in msg
+
+
 # ── _hermes_sentinel_sdk_runtime ────────────────────────────────────────────
 #
 # The Hermes sentinel launcher historically hardcoded `--runtime hermes_sdk`,
@@ -9129,3 +9129,52 @@ def test_build_hermes_sentinel_cmd_default_runtime_unchanged_for_existing_entrie
     assert "--runtime" in cmd
     runtime_idx = cmd.index("--runtime") + 1
     assert cmd[runtime_idx] == "hermes_sdk"
+
+
+# ---------- gateway spaces use as full alias of `ax spaces use` (issue #82) ----------
+
+
+def _wire_gateway_spaces_use(monkeypatch, tmp_path):
+    """Stand up a gateway session + stub resolution so `gateway spaces use`
+    runs offline. Returns the captured save_space_id call dict."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {"token": "axp_u_test.token", "base_url": "https://paxai.app", "space_id": "space-old"}
+    )
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: MagicMock())
+    monkeypatch.setattr(gateway_cmd, "resolve_space_id", lambda c, explicit=None: "space-new")
+    monkeypatch.setattr(gateway_cmd, "_space_name_for_id", lambda c, sid: "New Space")
+    monkeypatch.setattr(gateway_core, "active_gateway_pid", lambda: None)
+    captured = {}
+    # save_space_id is lazily imported from ..config inside the command.
+    monkeypatch.setattr("ax_cli.config.save_space_id", lambda sid, **kw: captured.update(sid=sid, **kw))
+    return captured
+
+
+def test_gateway_spaces_use_syncs_both_stores(monkeypatch, tmp_path):
+    captured = _wire_gateway_spaces_use(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["gateway", "spaces", "use", "space-new", "--json"])
+
+    assert result.exit_code == 0, result.output
+    # Gateway session updated...
+    assert gateway_core.load_gateway_session()["space_id"] == "space-new"
+    # ...and the CLI config store synced too (default local).
+    assert captured == {"sid": "space-new", "local": True}
+    payload = json.loads(result.stdout)
+    assert payload["space_id"] == "space-new"
+    assert payload["cli_scope"] == "local"
+    assert payload["gateway_session"]["updated"] is True
+
+
+def test_gateway_spaces_use_global_writes_global_cli_config(monkeypatch, tmp_path):
+    captured = _wire_gateway_spaces_use(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["gateway", "spaces", "use", "space-new", "--global", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"sid": "space-new", "local": False}
+    assert json.loads(result.stdout)["cli_scope"] == "global"

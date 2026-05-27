@@ -3190,6 +3190,72 @@ def save_gateway_session(data: dict[str, Any]) -> Path:
     return session_path()
 
 
+def apply_space_to_gateway_session(
+    space_id: str,
+    *,
+    space_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Point the Gateway bootstrap session at ``space_id`` so it can't diverge
+    from the CLI's current space.
+
+    Returns ``None`` when no Gateway session exists (Gateway was never logged
+    in) — the caller has nothing to sync and should stay silent. A session is
+    never fabricated here: if one is created later by ``ax gateway login`` the
+    operator picks the space then.
+
+    The write is atomic and daemon-independent (see :func:`_write_json` /
+    :func:`save_gateway_session`), so it is safe while the daemon is stopped.
+    The daemon reads ``session.json`` only at startup, so when a daemon is
+    already running the change applies on the next ``ax gateway start`` — the
+    returned ``daemon_running`` flag lets the caller warn about that.
+
+    Returns a status dict::
+
+        {
+          "updated": bool,            # False when the session already matched
+          "session_path": str,
+          "previous_space_id": str | None,
+          "space_id": str,
+          "space_name": str | None,
+          "daemon_running": bool,
+        }
+    """
+    session = load_gateway_session()
+    if not session:
+        return None
+
+    previous_space_id = str(session.get("space_id") or "").strip() or None
+    daemon_running = active_gateway_pid() is not None
+
+    if previous_space_id == space_id:
+        # Already aligned — don't rewrite the file or emit a redundant audit
+        # event. Still report daemon state in case the caller wants to message.
+        return {
+            "updated": False,
+            "session_path": str(session_path()),
+            "previous_space_id": previous_space_id,
+            "space_id": space_id,
+            "space_name": space_name or session.get("space_name"),
+            "daemon_running": daemon_running,
+        }
+
+    session["space_id"] = space_id
+    if space_name:
+        session["space_name"] = space_name
+    path = save_gateway_session(session)
+    # Keep the spaces cache warm so subsequent slug switches stay cache-served.
+    upsert_space_cache_entry(space_id, name=space_name, slug=None)
+    record_gateway_activity("gateway_space_use", space_id=space_id, space_name=space_name)
+    return {
+        "updated": True,
+        "session_path": str(path),
+        "previous_space_id": previous_space_id,
+        "space_id": space_id,
+        "space_name": space_name,
+        "daemon_running": daemon_running,
+    }
+
+
 _LOAD_SNAPSHOT_KEY = "_load_snapshot"
 
 # Fields the operator (CLI / UI server) writes authoritatively. The daemon's

@@ -845,9 +845,7 @@ class TestDeriveConfidence:
     def test_sse_disconnected_returns_low(self):
         from ax_cli.gateway import _derive_confidence
 
-        level, reason, detail = _derive_confidence(
-            {}, mode="LIVE", liveness="stale", reachability="sse_disconnected"
-        )
+        level, reason, detail = _derive_confidence({}, mode="LIVE", liveness="stale", reachability="sse_disconnected")
         assert level == "LOW"
         assert reason == "sse_disconnected"
         assert "SSE subscription is down" in detail
@@ -855,9 +853,7 @@ class TestDeriveConfidence:
     def test_attach_required_still_returns_low(self):
         from ax_cli.gateway import _derive_confidence
 
-        level, reason, detail = _derive_confidence(
-            {}, mode="LIVE", liveness="stale", reachability="attach_required"
-        )
+        level, reason, detail = _derive_confidence({}, mode="LIVE", liveness="stale", reachability="attach_required")
         assert level == "LOW"
         assert reason == "attach_required"
 
@@ -3099,6 +3095,92 @@ class TestGatewaySessionStalenessWarning:
         gw_cmd._load_gateway_user_client()
         stderr = capsys.readouterr().err
         assert "older than your user login" not in stderr
+
+
+class TestApplySpaceToGatewaySession:
+    """issue #82: `ax spaces use` must keep the Gateway session pointed at the
+    same space as the CLI, atomically and daemon-independently."""
+
+    def test_returns_none_when_no_session(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+        assert gw.apply_space_to_gateway_session("space-b", space_name="Bee") is None
+
+    def test_updates_session_space(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(gw, "active_gateway_pid", lambda: None)
+        gw.save_gateway_session({"token": "axp_u_x", "space_id": "space-a", "space_name": "Ay"})
+
+        out = gw.apply_space_to_gateway_session("space-b", space_name="Bee")
+
+        assert out["updated"] is True
+        assert out["previous_space_id"] == "space-a"
+        assert out["space_id"] == "space-b"
+        assert out["daemon_running"] is False
+        # Persisted to disk.
+        reloaded = gw.load_gateway_session()
+        assert reloaded["space_id"] == "space-b"
+        assert reloaded["space_name"] == "Bee"
+
+    def test_noop_when_already_aligned(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(gw, "active_gateway_pid", lambda: None)
+        gw.save_gateway_session({"token": "axp_u_x", "space_id": "space-a", "space_name": "Ay"})
+        # Spy: a no-op must not emit a redundant audit event.
+        calls = []
+        monkeypatch.setattr(gw, "record_gateway_activity", lambda *a, **k: calls.append((a, k)))
+
+        out = gw.apply_space_to_gateway_session("space-a", space_name="Ay")
+
+        assert out["updated"] is False
+        assert out["space_id"] == "space-a"
+        assert calls == []
+
+    def test_reports_daemon_running(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(gw, "active_gateway_pid", lambda: 4321)
+        gw.save_gateway_session({"token": "axp_u_x", "space_id": "space-a"})
+
+        out = gw.apply_space_to_gateway_session("space-b", space_name="Bee")
+
+        assert out["updated"] is True
+        assert out["daemon_running"] is True
+
+
+class TestGatewaySpaceDivergenceWarning:
+    """issue #82: warn when the Gateway session space and CLI config space
+    diverge, mirroring the #74/#75 staleness-warning pattern. Fail-soft."""
+
+    def _setup(self, monkeypatch, tmp_path, *, session_space, cli_space):
+        # Drive both reads deterministically rather than depending on the
+        # ambient filesystem (cwd .ax/config.toml could otherwise leak in).
+        session = {"token": "axp_u_x", "base_url": "https://paxai.app"}
+        if session_space is not None:
+            session["space_id"] = session_space
+        monkeypatch.setattr(gw_cmd, "load_gateway_session", lambda: dict(session))
+        monkeypatch.setattr(
+            "ax_cli.config._load_config",
+            lambda: {"space_id": cli_space} if cli_space is not None else {},
+        )
+        # Keep the sibling token-staleness check silent.
+        monkeypatch.setattr(gw_cmd, "_warn_if_gateway_session_stale", lambda: None)
+
+    def test_warns_when_spaces_differ(self, monkeypatch, tmp_path, capsys):
+        self._setup(monkeypatch, tmp_path, session_space="space-a", cli_space="space-b")
+        gw_cmd._load_gateway_user_client()
+        stderr = capsys.readouterr().err
+        assert "Gateway space (space-a) differs from your CLI space (space-b)" in stderr
+        # Rich may wrap "ax" onto the previous line; match the unwrapped tail.
+        assert "spaces use <space>" in stderr
+
+    def test_no_warning_when_aligned(self, monkeypatch, tmp_path, capsys):
+        self._setup(monkeypatch, tmp_path, session_space="space-a", cli_space="space-a")
+        gw_cmd._load_gateway_user_client()
+        assert "differs from your CLI space" not in capsys.readouterr().err
+
+    def test_no_warning_when_cli_space_unset(self, monkeypatch, tmp_path, capsys):
+        self._setup(monkeypatch, tmp_path, session_space="space-a", cli_space=None)
+        gw_cmd._load_gateway_user_client()
+        assert "differs from your CLI space" not in capsys.readouterr().err
 
 
 class TestLocalOriginSignature:
