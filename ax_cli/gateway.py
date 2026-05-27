@@ -270,6 +270,7 @@ GATEWAY_ACTIVITY_EVENTS: dict[str, str] = {
     "connector_tool_started": "tool",
     "connector_tool_completed": "tool",
     "connector_tool_failed": "result",
+    "connector_tool_denied": "result",
     # result: terminal outcome that is not a reply
     "runtime_error": "result",
     "agent_skipped": "result",
