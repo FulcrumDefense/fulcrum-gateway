@@ -11,13 +11,12 @@ from typing import Any
 
 import httpx
 
+from ..constants import CONNECT_TIMEOUT, DEFAULT_COMPOSIO_BASE_URL, READ_TIMEOUT
 from ..errors import ConnectorAuthError, ConnectorProviderError, classify_provider_error
 
 log = logging.getLogger("connectors.composio")
 
-DEFAULT_BASE_URL = "https://backend.composio.dev/api/v2"
-CONNECT_TIMEOUT = 10.0
-READ_TIMEOUT = 30.0
+DEFAULT_BASE_URL = DEFAULT_COMPOSIO_BASE_URL
 
 
 def _base_url(config: dict[str, Any]) -> str:

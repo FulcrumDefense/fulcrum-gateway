@@ -266,6 +266,11 @@ GATEWAY_ACTIVITY_EVENTS: dict[str, str] = {
     "channel_message_received": "received",
     "channel_message_delivered": "delivered",
     "channel_reply_sent": "reply",
+    # connector: outbound tool invocations via connector providers
+    "connector_tool_started": "tool",
+    "connector_tool_completed": "tool",
+    "connector_tool_failed": "result",
+    "connector_tool_denied": "result",
     # result: terminal outcome that is not a reply
     "runtime_error": "result",
     "agent_skipped": "result",
