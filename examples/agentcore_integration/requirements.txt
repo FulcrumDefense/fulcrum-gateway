@@ -1,0 +1,6 @@
+# Dependencies for the demo AgentCore Runtime agent (agent.py).
+# These are deployed *with* the agent to AgentCore Runtime — they are NOT
+# the gateway-side deps. The gateway bridge only needs `axctl[bedrock]`.
+
+bedrock-agentcore       # AgentCore Runtime SDK (BedrockAgentCoreApp, @app.entrypoint)
+strands-agents          # Strands Agents framework used by this demo
