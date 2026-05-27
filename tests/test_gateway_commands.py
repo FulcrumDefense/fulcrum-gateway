@@ -964,7 +964,9 @@ def test_gateway_agents_add_mints_token_and_writes_registry(monkeypatch, tmp_pat
     assert registry["bindings"][0]["asset_id"] == "agent-1"
     assert registry["bindings"][0]["approved_state"] == "approved"
     assert registry["agents"][0]["install_id"] == registry["bindings"][0]["install_id"]
-    token_file = Path(registry["agents"][0]["token_file"])
+    # #89: token_file is now stored relative to gateway_dir(); resolve via
+    # the helper to find the on-disk path.
+    token_file = gateway_core.resolve_managed_agent_token_path(registry["agents"][0])
     assert token_file.exists()
     assert token_file.read_text().strip() == "axp_a_agent.secret"
     recent = gateway_core.load_recent_gateway_activity()
@@ -7797,7 +7799,11 @@ def test_auto_disable_after_max_consecutive_errors(monkeypatch, tmp_path):
     """After SETUP_ERROR_MAX_CONSECUTIVE identical errors, the agent is
     auto-disabled with setup_disabled=True and a runtime_auto_disabled event."""
     _isolate_gateway_paths(monkeypatch, tmp_path)
-    token_file = tmp_path / "token-missing"
+    # Token file stored as relative path (post-#89 mint format) — points at
+    # the canonical agents/<name>/token slot under AX_GATEWAY_DIR. Leaving
+    # it absent makes load_gateway_managed_agent_token raise with the
+    # canonical path in the error message, which is what we seed below.
+    expected_token_path = gateway_core.agent_token_path("disable-hermes")
 
     long_ago = (
         datetime.now(timezone.utc) - timedelta(seconds=gateway_core.SETUP_ERROR_BACKOFF_SCHEDULE[-1] + 60)
@@ -7810,10 +7816,10 @@ def test_auto_disable_after_max_consecutive_errors(monkeypatch, tmp_path):
             "space_id": "space-1",
             "base_url": "https://paxai.app",
             "runtime_type": "hermes_sentinel",
-            "token_file": str(token_file),
+            "token_file": "agents/disable-hermes/token",
             "last_runtime_error_at": long_ago,
             "consecutive_setup_errors": gateway_core.SETUP_ERROR_MAX_CONSECUTIVE - 1,
-            "last_setup_error_signature": f"Gateway-managed token file is missing: {token_file}"[:120],
+            "last_setup_error_signature": f"Gateway-managed token file is missing: {expected_token_path}"[:120],
         },
         client_factory=lambda **kwargs: object(),
     )
