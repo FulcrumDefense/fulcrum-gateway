@@ -8311,7 +8311,9 @@ def local_inbox(
 def add_agent(
     name: str = typer.Argument(..., help="Managed agent name"),
     template_id: str = typer.Option(
-        None, "--template", help="Agent template: echo_test | ollama | hermes | sentinel_cli | claude_code_channel"
+        None,
+        "--template",
+        help="Agent template: " + " | ".join(t["id"] for t in agent_template_list()),
     ),
     runtime_type: str = typer.Option(
         None,
