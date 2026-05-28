@@ -3604,6 +3604,23 @@ def test_gateway_template_echo_alias_resolves():
     assert gateway_runtime_types.agent_template_definition("echo")["id"] == "echo_test"
 
 
+def test_template_help_string_reflects_operator_catalog():
+    """The --template help string for `ax gateway agents add` must list the
+    same operator-facing templates the dynamic catalog exposes, so the help
+    text doesn't drift behind every new template the way it did up through
+    langgraph / autogen / strands / langgraph_composio (closes #131).
+    """
+    help_str = gateway_cmd._template_help_string()
+    assert help_str.startswith("Agent template: ")
+    # Every operator-facing template currently in the catalog must appear in
+    # the help string. Drift on this assertion means the dynamic source of
+    # truth in agent_template_list() has new templates that the help text
+    # would not surface, which is exactly the bug #131 closed.
+    catalog_ids = {str(t.get("id")) for t in gateway_runtime_types.agent_template_list() if t.get("id")}
+    for template_id in catalog_ids:
+        assert template_id in help_str, f"missing {template_id!r} in --template help string"
+
+
 def test_gateway_templates_command_json_includes_ollama_catalog(monkeypatch):
     monkeypatch.setattr(
         gateway_cmd,

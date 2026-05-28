@@ -8351,17 +8351,20 @@ def local_inbox(
         console.print(f"  {created} {author}: {content[:160]}")
 
 
+def _template_help_string() -> str:
+    """Build the --template help string from the operator-facing template
+    catalog so new templates land in `--help` automatically. Originally a
+    hardcoded literal that drifted from the catalog as langgraph, autogen,
+    strands, and langgraph_composio shipped (closes #131).
+    """
+    ids = [str(t.get("id")) for t in agent_template_list() if t.get("id")]
+    return "Agent template: " + " | ".join(ids)
+
+
 @agents_app.command("add")
 def add_agent(
     name: str = typer.Argument(..., help="Managed agent name"),
-    template_id: str = typer.Option(
-        None,
-        "--template",
-        help=(
-            "Agent template: echo_test | ollama | hermes | langgraph | langgraph_composio | "
-            "sentinel_cli | claude_code_channel | …"
-        ),
-    ),
+    template_id: str = typer.Option(None, "--template", help=_template_help_string()),
     runtime_type: str = typer.Option(
         None,
         "--type",
