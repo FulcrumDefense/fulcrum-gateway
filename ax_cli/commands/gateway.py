@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -1035,6 +1036,51 @@ def _resolve_space_via_cache(value: str | None) -> str | None:
     return None
 
 
+_AGENTCORE_ARN_RE = re.compile(r"^arn:aws:bedrock-agentcore:([a-z0-9-]+):(\d{12}):runtime/(.+)$")
+_MODEL_ARN_RE = re.compile(r"^arn:aws:bedrock:")
+
+
+def _validate_bedrock_options(
+    *,
+    runtime_arn: str | None,
+    region: str | None,
+    qualifier: str | None,
+    payload_key: str | None,
+    aws_profile: str | None,
+    template_id: str,
+) -> dict[str, str]:
+    bedrock_flags_set = any([runtime_arn, region, qualifier, payload_key, aws_profile])
+    if bedrock_flags_set and template_id != "bedrock_agentcore":
+        raise ValueError(f"--bedrock-* flags are only valid with --template bedrock_agentcore, not '{template_id}'.")
+    arn = (runtime_arn or os.environ.get("AX_BEDROCK_RUNTIME_ARN", "")).strip()
+    if not arn:
+        raise ValueError(
+            "bedrock_agentcore template requires --bedrock-runtime-arn "
+            "(or AX_BEDROCK_RUNTIME_ARN env var). "
+            "Expected shape: arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>"
+        )
+    if _MODEL_ARN_RE.match(arn):
+        raise ValueError(
+            f"ARN looks like a Bedrock foundation-model ARN, not an AgentCore runtime ARN: {arn!r}. "
+            "Use the ARN from `agentcore list-runtimes`, not from the model catalog."
+        )
+    m = _AGENTCORE_ARN_RE.match(arn)
+    if not m:
+        raise ValueError(
+            f"Invalid AgentCore runtime ARN: {arn!r}. "
+            "Expected: arn:aws:bedrock-agentcore:<region>:<12-digit-account>:runtime/<id>"
+        )
+    arn_region = m.group(1)
+    resolved_region = (region or "").strip() or arn_region or None
+    return {
+        "bedrock_runtime_arn": arn,
+        "bedrock_region": resolved_region or "",
+        "bedrock_qualifier": (qualifier or "").strip() or "DEFAULT",
+        "bedrock_payload_key": (payload_key or "").strip() or "prompt",
+        "aws_profile": (aws_profile or "").strip(),
+    }
+
+
 def _normalize_runtime_type(runtime_type: str) -> str:
     try:
         return str(runtime_type_definition(runtime_type)["id"])
@@ -1272,6 +1318,11 @@ def _register_managed_agent(
     exec_cmd: str | None = None,
     workdir: str | None = None,
     ollama_model: str | None = None,
+    bedrock_runtime_arn: str | None = None,
+    bedrock_region: str | None = None,
+    bedrock_qualifier: str | None = None,
+    bedrock_payload_key: str | None = None,
+    aws_profile: str | None = None,
     space_id: str | None = None,
     audience: str = "both",
     description: str | None = None,
@@ -1308,6 +1359,17 @@ def _register_managed_agent(
         raise ValueError("--ollama-model is only supported with the Ollama template.")
     if template_effective_id == "ollama" and not normalized_ollama_model:
         normalized_ollama_model = str(ollama_setup_status().get("recommended_model") or "").strip() or None
+    bedrock_flags_set = any([bedrock_runtime_arn, bedrock_region, bedrock_qualifier, bedrock_payload_key, aws_profile])
+    normalized_bedrock: dict[str, str] = {}
+    if bedrock_flags_set or template_effective_id == "bedrock_agentcore":
+        normalized_bedrock = _validate_bedrock_options(
+            runtime_arn=bedrock_runtime_arn,
+            region=bedrock_region,
+            qualifier=bedrock_qualifier,
+            payload_key=bedrock_payload_key,
+            aws_profile=aws_profile,
+            template_id=template_effective_id,
+        )
     if template_effective_id in {"hermes", "sentinel_cli", "claude_code_channel"} and not explicit_workdir:
         raise ValueError(
             f"Template {template['label']} requires --workdir so Gateway can bind the agent to its runtime folder."
@@ -1383,6 +1445,11 @@ def _register_managed_agent(
         "exec_command": exec_cmd,
         "workdir": workdir,
         "ollama_model": normalized_ollama_model,
+        "bedrock_runtime_arn": normalized_bedrock.get("bedrock_runtime_arn"),
+        "bedrock_region": normalized_bedrock.get("bedrock_region"),
+        "bedrock_qualifier": normalized_bedrock.get("bedrock_qualifier"),
+        "bedrock_payload_key": normalized_bedrock.get("bedrock_payload_key"),
+        "aws_profile": normalized_bedrock.get("aws_profile"),
         "timeout_seconds": timeout_effective,
         "token_file": str(token_file),
         "desired_state": "running" if start else "stopped",
@@ -1679,6 +1746,11 @@ def _update_managed_agent(
     exec_cmd: str | object = _UNSET,
     workdir: str | object = _UNSET,
     ollama_model: str | object = _UNSET,
+    bedrock_runtime_arn: str | object = _UNSET,
+    bedrock_region: str | object = _UNSET,
+    bedrock_qualifier: str | object = _UNSET,
+    bedrock_payload_key: str | object = _UNSET,
+    aws_profile: str | object = _UNSET,
     description: str | None = None,
     model: str | None = None,
     system_prompt: str | object = _UNSET,
@@ -1793,6 +1865,35 @@ def _update_managed_agent(
         entry["ollama_model"] = ollama_model_effective
     else:
         entry.pop("ollama_model", None)
+    bedrock_flags = {
+        "bedrock_runtime_arn": bedrock_runtime_arn,
+        "bedrock_region": bedrock_region,
+        "bedrock_qualifier": bedrock_qualifier,
+        "bedrock_payload_key": bedrock_payload_key,
+        "aws_profile": aws_profile,
+    }
+    if template_effective_id == "bedrock_agentcore":
+        if template is not None or any(v is not _UNSET for v in bedrock_flags.values()):
+            normalized_bedrock = _validate_bedrock_options(
+                runtime_arn=bedrock_runtime_arn
+                if bedrock_runtime_arn is not _UNSET
+                else entry.get("bedrock_runtime_arn"),  # type: ignore[arg-type]
+                region=bedrock_region
+                if bedrock_region is not _UNSET
+                else (None if bedrock_runtime_arn is not _UNSET else entry.get("bedrock_region")),  # type: ignore[arg-type]
+                qualifier=bedrock_qualifier if bedrock_qualifier is not _UNSET else entry.get("bedrock_qualifier"),  # type: ignore[arg-type]
+                payload_key=bedrock_payload_key
+                if bedrock_payload_key is not _UNSET
+                else entry.get("bedrock_payload_key"),  # type: ignore[arg-type]
+                aws_profile=aws_profile if aws_profile is not _UNSET else entry.get("aws_profile"),  # type: ignore[arg-type]
+                template_id="bedrock_agentcore",
+            )
+            entry.update(normalized_bedrock)
+    else:
+        if any(v is not _UNSET for v in bedrock_flags.values()):
+            raise ValueError("--bedrock-* flags are only valid with --template bedrock_agentcore.")
+        for _k in ("bedrock_runtime_arn", "bedrock_region", "bedrock_qualifier", "bedrock_payload_key", "aws_profile"):
+            entry.pop(_k, None)
     entry["updated_at"] = datetime.now(timezone.utc).isoformat()
     entry.setdefault("transport", "gateway")
     entry.setdefault("credential_source", "gateway")
@@ -8311,7 +8412,9 @@ def local_inbox(
 def add_agent(
     name: str = typer.Argument(..., help="Managed agent name"),
     template_id: str = typer.Option(
-        None, "--template", help="Agent template: echo_test | ollama | hermes | sentinel_cli | claude_code_channel"
+        None,
+        "--template",
+        help="Agent template: echo_test | ollama | hermes | strands | langgraph | bedrock_agentcore | sentinel_cli | claude_code_channel",
     ),
     runtime_type: str = typer.Option(
         None,
@@ -8321,6 +8424,21 @@ def add_agent(
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Ollama model override for the Ollama template"),
+    bedrock_runtime_arn: str = typer.Option(
+        None, "--bedrock-runtime-arn", help="AgentCore runtime ARN (bedrock_agentcore template)"
+    ),
+    bedrock_region: str = typer.Option(
+        None, "--bedrock-region", help="AWS region override; parsed from ARN if omitted"
+    ),
+    bedrock_qualifier: str = typer.Option(
+        None, "--bedrock-qualifier", help="AgentCore endpoint qualifier (default: DEFAULT)"
+    ),
+    bedrock_payload_key: str = typer.Option(
+        None, "--bedrock-payload-key", help="JSON key used to pass the prompt (default: prompt)"
+    ),
+    aws_profile: str = typer.Option(
+        None, "--aws-profile", help="AWS profile to use for this agent (injects AWS_PROFILE)"
+    ),
     space_id: str = typer.Option(
         None,
         "--space",
@@ -8395,6 +8513,11 @@ def add_agent(
             exec_cmd=exec_cmd,
             workdir=workdir,
             ollama_model=ollama_model,
+            bedrock_runtime_arn=bedrock_runtime_arn,
+            bedrock_region=bedrock_region,
+            bedrock_qualifier=bedrock_qualifier,
+            bedrock_payload_key=bedrock_payload_key,
+            aws_profile=aws_profile,
             space_id=space_id,
             audience=audience,
             description=description,
@@ -8435,6 +8558,13 @@ def update_agent(
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Ollama model override for the Ollama template"),
+    bedrock_runtime_arn: str = typer.Option(None, "--bedrock-runtime-arn", help="Update AgentCore runtime ARN"),
+    bedrock_region: str = typer.Option(None, "--bedrock-region", help="Update AWS region override"),
+    bedrock_qualifier: str = typer.Option(None, "--bedrock-qualifier", help="Update AgentCore endpoint qualifier"),
+    bedrock_payload_key: str = typer.Option(
+        None, "--bedrock-payload-key", help="Update JSON key used to pass the prompt"
+    ),
+    aws_profile: str = typer.Option(None, "--aws-profile", help="Update AWS profile for this agent"),
     description: str = typer.Option(None, "--description", help="Update platform agent description"),
     model: str = typer.Option(None, "--model", help="Update platform agent model"),
     system_prompt: str = typer.Option(
@@ -8490,6 +8620,11 @@ def update_agent(
             exec_cmd=exec_cmd if exec_cmd is not None else _UNSET,
             workdir=workdir if workdir is not None else _UNSET,
             ollama_model=ollama_model if ollama_model is not None else _UNSET,
+            bedrock_runtime_arn=bedrock_runtime_arn if bedrock_runtime_arn is not None else _UNSET,
+            bedrock_region=bedrock_region if bedrock_region is not None else _UNSET,
+            bedrock_qualifier=bedrock_qualifier if bedrock_qualifier is not None else _UNSET,
+            bedrock_payload_key=bedrock_payload_key if bedrock_payload_key is not None else _UNSET,
+            aws_profile=aws_profile if aws_profile is not None else _UNSET,
             description=description,
             model=model,
             system_prompt=resolved_prompt,

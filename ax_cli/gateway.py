@@ -3960,6 +3960,17 @@ def sanitize_exec_env(prompt: str, entry: dict[str, Any]) -> dict[str, str]:
     connector_ref = str(entry.get("connector_ref") or "").strip()
     if connector_ref:
         env["AX_GATEWAY_CONNECTOR_REF"] = connector_ref
+    bedrock_arn = str(entry.get("bedrock_runtime_arn") or "").strip()
+    if bedrock_arn:
+        env["AX_BEDROCK_RUNTIME_ARN"] = bedrock_arn
+        bedrock_region = str(entry.get("bedrock_region") or "").strip()
+        if bedrock_region:
+            env["AX_BEDROCK_REGION"] = bedrock_region
+        env["AX_BEDROCK_QUALIFIER"] = str(entry.get("bedrock_qualifier") or "DEFAULT").strip() or "DEFAULT"
+        env["AX_BEDROCK_PAYLOAD_KEY"] = str(entry.get("bedrock_payload_key") or "prompt").strip() or "prompt"
+        aws_profile = str(entry.get("aws_profile") or "").strip()
+        if aws_profile:
+            env["AWS_PROFILE"] = aws_profile
     return env
 
 
@@ -4003,6 +4014,7 @@ def _run_exec_handler(
     *,
     message_id: str | None = None,
     space_id: str | None = None,
+    sender_id: str | None = None,
     timeout_seconds: int | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
@@ -4012,6 +4024,8 @@ def _run_exec_handler(
         env["AX_GATEWAY_MESSAGE_ID"] = message_id
     if space_id:
         env["AX_GATEWAY_SPACE_ID"] = space_id
+    if sender_id:
+        env["AX_GATEWAY_SENDER_ID"] = sender_id
     # Expose the composed system prompt (operator role + gateway environment
     # context) so exec-runtime bridges (Ollama, custom python bridges, etc.)
     # can read it via env. Hermes / Claude / Sentinel pass the prompt as a
@@ -6203,12 +6217,21 @@ class ManagedAgentRuntime:
             command = str(self.entry.get("exec_command") or "").strip()
             if not command:
                 raise ValueError("exec runtime requires exec_command")
+            _d = data or {}
+            _author = _d.get("author") or {}
+            sender_id = (
+                str(
+                    _author.get("id") or _author.get("name") or _d.get("agent_id") or _d.get("agent_name") or ""
+                ).strip()
+                or None
+            )
             return _run_exec_handler(
                 command,
                 prompt,
                 self.entry,
                 message_id=message_id or None,
                 space_id=self.space_id,
+                sender_id=sender_id,
                 timeout_seconds=runtime_timeout_seconds(self.entry),
                 on_event=lambda event: self._handle_exec_event(event, message_id=message_id),
             )
