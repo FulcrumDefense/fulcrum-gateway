@@ -1,18 +1,26 @@
-"""svg_viz post_to_chat tool — uploads an SVG via the AX context API and
-posts an ``apps signal`` message so paxai's chat renders it as a folded
-signal card (Context Explorer panel), not as a code block.
+"""svg_viz post_to_chat tool — uploads an SVG as a file and posts a chat
+message with it attached, so paxai renders it inline as an image (not as
+a code block / raw text).
 
-The render-as-card path is documented in
-``docs/mcp-app-signal-adapter.md``:
+The render path (verified live 2026-05-28):
 
-1. ``client.set_context(space_id, key, value=svg_string)`` — stores the SVG
-   as a context resource keyed for retrieval.
-2. ``client.send_message(space_id, body, metadata={...ui.widget...})`` —
-   posts a message whose ``metadata.ui.widget.resource_uri`` points at
-   ``ui://context/explorer`` and whose ``metadata.ui.widget.initial_data``
-   carries the context key. paxai's frontend renders the message as a
-   folded signal card; clicking it opens the Context Explorer panel which
-   resolves the key and renders the SVG.
+1. ``client.upload_file(svg_temp_path, space_id=...)`` — uploads the SVG
+   as a file with content-type ``image/svg+xml`` (client.py maps the
+   ``.svg`` suffix automatically). The uploads endpoint carries the
+   content-type that makes paxai treat it as a renderable image.
+2. ``client.send_message(space_id, body, attachments=[...], message_type="text")``
+   — posts a normal chat message with the uploaded file in the
+   ``attachments`` list. That attachments param is what makes paxai
+   render the SVG inline — the same path a user dragging an SVG into
+   chat uses.
+
+Two earlier approaches did NOT render and were dropped:
+  - storing the SVG as a raw ``set_context`` value (rendered as text);
+  - referencing the upload only inside ``metadata.ui.widget`` signal
+    cards (the message posted but the image didn't display). Per Jacob
+    Taunton: "svg should work, but it needs to be uploaded as svg and
+    not ctx" — the fix is the file upload + attachments param, not
+    signal-card metadata.
 
 Identity: this tool uses ``ax_cli.config.get_client()`` which reads the
 agent's credentials from the env Gateway passes to the bridge subprocess
@@ -22,7 +30,7 @@ No new credential handling here.
 Failure mode: returns a structured error dict instead of raising. The
 calling LLM gets a readable error and can recover; the rest of the
 agent loop continues. We deliberately do NOT fall back to "post the
-SVG inline" — that's the failure case this tool exists to prevent.
+SVG inline as text" — that's the failure case this tool exists to prevent.
 """
 
 from __future__ import annotations
@@ -33,85 +41,23 @@ import time
 import uuid
 from typing import Any
 
-CONTEXT_KEY_PREFIX = "svg_viz"
-"""Prefix on auto-generated context keys so the Context Explorer can group them."""
-
-DEFAULT_TTL_S = 60 * 60 * 24 * 7
-"""Auto-expire SVG context entries after 7 days (override via the ttl arg)."""
-
-APP_KEY = "context"
-RESOURCE_URI = "ui://context/explorer"
-"""Per docs/mcp-app-signal-adapter.md — SVG signals open the Context Explorer panel."""
+SVG_LABEL_PREFIX = "svg_viz"
+"""Prefix on the auto-generated, human-readable label returned to the caller."""
 
 
-def _make_context_key(title: str) -> str:
-    """Build a stable-shaped context key for a posted SVG.
+def _make_label(title: str) -> str:
+    """Build a stable-shaped label for a posted SVG (returned to the caller
+    for traceability/logging).
 
     Pattern: ``svg_viz:<timestamp>:<random>:<title-slug>``. The random
     component keeps simultaneous posts from colliding; the title slug
-    is a human-readable hint for anyone browsing context.
+    is a human-readable hint.
     """
     ts = int(time.time())
     short_id = uuid.uuid4().hex[:8]
     slug = "".join(c if c.isalnum() else "-" for c in title.lower())[:48]
     slug = slug.strip("-") or "svg"
-    return f"{CONTEXT_KEY_PREFIX}:{ts}:{short_id}:{slug}"
-
-
-def _build_signal_metadata(
-    *,
-    context_key: str,
-    title: str,
-    summary: str,
-    space_id: str,
-    agent_name: str | None,
-    severity: str = "info",
-) -> dict[str, Any]:
-    """Construct the ``metadata.ui.widget`` + ``metadata.ui.cards`` payload.
-
-    Mirrors the shape ``axctl apps signal context`` emits (see
-    ``ax_cli/commands/apps.py::_build_signal_metadata``) so the
-    transcript-signal rendering path treats SVG posts identically to
-    CLI-authored signals.
-    """
-    tool_call_id = f"svg_viz_post:{uuid.uuid4().hex[:12]}"
-    return {
-        "top_level_ingress": False,
-        "signal_only": True,
-        "app_signal": {
-            "source": "svg_viz_post_to_chat",
-            "app": APP_KEY,
-            "action": "get",
-            "signal_only": True,
-            "severity": severity,
-        },
-        "ui": {
-            "widget": {
-                "resource_uri": RESOURCE_URI,
-                "title": title,
-                "initial_data": {
-                    "context_key": context_key,
-                    "space_id": space_id,
-                    "kind": "svg",
-                },
-            },
-            "cards": [
-                {
-                    "type": "context_artifact",
-                    "title": title,
-                    "summary": summary,
-                    "payload": {
-                        "context_key": context_key,
-                        "kind": "svg",
-                        "source": "svg_viz_post_to_chat",
-                        "author_agent": agent_name,
-                        "tool_call_id": tool_call_id,
-                    },
-                }
-            ],
-        },
-        "tool_call_id": tool_call_id,
-    }
+    return f"{SVG_LABEL_PREFIX}:{ts}:{short_id}:{slug}"
 
 
 def post_svg_to_chat(
@@ -120,17 +66,18 @@ def post_svg_to_chat(
     summary: str = "",
     *,
     space_id: str | None = None,
-    ttl_seconds: int = DEFAULT_TTL_S,
 ) -> dict[str, Any]:
-    """Upload `svg` to the context API and post a signal-card message.
+    """Upload `svg` as a file and post a chat message with it attached.
 
-    Returns a dict with ``message_id``, ``context_key``, ``space_id``,
-    and ``title``. On failure returns ``{"error": "...", "code": "..."}``.
+    paxai renders the attached SVG inline as an image. Returns a dict with
+    ``message_id``, ``attachment_id``, ``space_id``, and ``title``. On
+    failure returns ``{"error": "...", "code": "..."}``.
 
     The caller (typically the LLM through MCP) supplies the SVG string
     produced by ``chart`` or ``status_card``, a title, and an optional
-    summary. The agent's AX identity comes from the env Gateway already
-    set on the bridge subprocess; we don't override it.
+    summary (used as the message body). The agent's AX identity comes from
+    the env Gateway already set on the bridge subprocess; we don't override
+    it.
     """
     if not isinstance(svg, str) or not svg.strip().startswith("<svg"):
         return {
@@ -166,49 +113,88 @@ def post_svg_to_chat(
             "code": "NO_SPACE",
         }
 
-    context_key = _make_context_key(title)
+    # Upload the SVG as a FILE (content-type image/svg+xml) rather than storing
+    # it as a raw context value. paxai renders an uploaded svg file inline as
+    # an image; a raw-value context entry renders as text (which is what an
+    # earlier version did, and why cards showed markup instead of a chart).
+    # Per Jacob Taunton: "svg should work, but it needs to be uploaded as svg
+    # and not ctx." The uploads endpoint carries the content-type; client.py
+    # already maps .svg -> image/svg+xml.
+    import tempfile
+
+    label = _make_label(title)
+    tmp_path: str | None = None
     try:
-        client.set_context(resolved_space, context_key, svg, ttl=ttl_seconds)
+        # upload_file takes a path, so stage the SVG to a temp .svg file.
+        fd, tmp_path = tempfile.mkstemp(suffix=".svg", prefix="ax_svg_")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(svg)
+        upload = client.upload_file(tmp_path, space_id=resolved_space)
     except Exception as exc:  # noqa: BLE001 - HTTP errors etc
         return {
-            "error": f"context upload failed: {exc}",
-            "code": "CONTEXT_UPLOAD_FAILED",
-            "context_key": context_key,
+            "error": f"svg file upload failed: {exc}",
+            "code": "SVG_UPLOAD_FAILED",
+            "label": label,
         }
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
-    agent_name = os.environ.get("AX_AGENT_NAME") or os.environ.get("AX_GATEWAY_AGENT_NAME")
-    metadata = _build_signal_metadata(
-        context_key=context_key,
-        title=title,
-        summary=summary or title,
-        space_id=resolved_space,
-        agent_name=agent_name,
-    )
+    # Pull the uploaded file's reference fields. The uploads endpoint returns
+    # an id/url/content_type; exact key names vary, so probe defensively.
+    upload_rec = upload.get("upload", upload) if isinstance(upload, dict) else {}
+    attachment_id = upload_rec.get("attachment_id") or upload_rec.get("id") or upload_rec.get("file_id")
+    file_url = upload_rec.get("url") or upload_rec.get("file_url")
+    content_type = upload_rec.get("content_type") or "image/svg+xml"
+    filename = upload_rec.get("filename")
+    file_id = upload_rec.get("file_id")
 
-    message_body = summary.strip() or f"📊 {title}"
+    # Post a plain message with the SVG as a real attachment. send_message's
+    # `attachments` param is what makes paxai render the SVG inline as an
+    # image — the same path a user dragging an SVG into chat uses. (An earlier
+    # version tried metadata.ui.widget signal cards; those posted but didn't
+    # render the image. Verified 2026-05-28: the attachments param renders the
+    # full status card inline.)
+    attachment = {
+        "attachment_id": attachment_id,
+        "content_type": content_type,
+        "kind": "svg",
+    }
+    if file_id:
+        attachment["file_id"] = file_id
+    if filename:
+        attachment["filename"] = filename
+    if file_url:
+        attachment["url"] = file_url
+
+    message_body = summary.strip() or title
 
     try:
         result = client.send_message(
             resolved_space,
             message_body,
-            metadata=metadata,
-            message_type="system",
+            attachments=[attachment],
+            message_type="text",
         )
     except Exception as exc:  # noqa: BLE001 - HTTP errors etc
         return {
-            "error": f"signal message post failed: {exc}",
+            "error": f"message post failed: {exc}",
             "code": "MESSAGE_POST_FAILED",
-            "context_key": context_key,
+            "label": label,
+            "attachment_id": attachment_id,
         }
 
     message = result.get("message", result) if isinstance(result, dict) else {}
     return {
         "ok": True,
         "message_id": message.get("id") or message.get("message_id"),
-        "context_key": context_key,
+        "attachment_id": attachment_id,
+        "label": label,
         "space_id": resolved_space,
         "title": title,
-        "resource_uri": RESOURCE_URI,
     }
 
 
@@ -228,29 +214,20 @@ POST_TO_CHAT_INPUT_SCHEMA: dict[str, Any] = {
         "title": {
             "type": "string",
             "description": (
-                "Human-readable title shown on the folded signal card and on "
-                "the opened panel (e.g., 'CENTCOM Ammo Status')."
+                "Human-readable title for the chart (e.g., 'CENTCOM Ammo Status'). Used to name the uploaded file."
             ),
         },
         "summary": {
             "type": "string",
             "description": (
-                "One-sentence description of what the SVG shows. Used as the "
-                "card subtitle AND as the chat message body. Defaults to the title."
+                "One-sentence description of what the SVG shows. Posted as the "
+                "chat message body alongside the inline image. Defaults to the title."
             ),
         },
         "space_id": {
             "type": "string",
             "description": (
                 "Optional: target aX space. Defaults to AX_SPACE_ID from env (the space the agent is bound to)."
-            ),
-        },
-        "ttl_seconds": {
-            "type": "number",
-            "description": (
-                "Optional: how long the SVG context entry lives. Default 604800 "
-                "(7 days). Use a smaller value (e.g., 3600 for 1 hour) for "
-                "ephemeral demos."
             ),
         },
     },
@@ -264,6 +241,5 @@ def _handle_post_to_chat(arguments: dict[str, Any]) -> dict[str, Any]:
         title=arguments.get("title") or "",
         summary=arguments.get("summary") or "",
         space_id=arguments.get("space_id"),
-        ttl_seconds=int(arguments.get("ttl_seconds") or DEFAULT_TTL_S),
     )
     return {"content": [{"type": "text", "text": json.dumps(result)}]}
