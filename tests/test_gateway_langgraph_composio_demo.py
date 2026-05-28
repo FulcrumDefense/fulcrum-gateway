@@ -147,6 +147,30 @@ def test_run_connector_round_executes_run_directive() -> None:
     assert "RUN:GITHUB_LIST_STARGAZERS" in reply
 
 
+def test_default_execute_passes_agent_identity(monkeypatch) -> None:
+    sys.path.insert(0, str(BRIDGE_PATH.parent))
+    try:
+        import langgraph_composio_bridge as bridge
+    finally:
+        sys.path.pop(0)
+
+    monkeypatch.setenv("AX_GATEWAY_AGENT_NAME", "lgc-demo")
+    monkeypatch.setenv("AX_AGENT_ID", "agent-uuid-1")
+    captured: list[dict] = []
+
+    def _fake_execute(*_a, **kwargs):
+        captured.append(kwargs)
+        return ConnectorToolCallResult(successful=True, data={})
+
+    monkeypatch.setattr(
+        "ax_cli.connectors.execute_connector_tool",
+        _fake_execute,
+    )
+    bridge._default_execute("demo", "GITHUB_LIST_PRS", {"owner": "o"})
+    assert captured[0]["agent_name"] == "lgc-demo"
+    assert captured[0]["agent_id"] == "agent-uuid-1"
+
+
 def test_bridge_main_requires_connector_ref(monkeypatch, capsys) -> None:
     sys.path.insert(0, str(BRIDGE_PATH.parent))
     try:

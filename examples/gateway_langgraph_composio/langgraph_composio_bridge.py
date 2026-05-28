@@ -78,10 +78,23 @@ def _default_search(connector_ref: str, use_case: str) -> Any:
     return search_connector_tools(connector_ref, use_case)
 
 
+def _runtime_agent_identity() -> tuple[str | None, str | None]:
+    name = os.environ.get("AX_GATEWAY_AGENT_NAME", "").strip() or os.environ.get("AX_AGENT_NAME", "").strip()
+    agent_id = os.environ.get("AX_GATEWAY_AGENT_ID", "").strip() or os.environ.get("AX_AGENT_ID", "").strip()
+    return (name or None, agent_id or None)
+
+
 def _default_execute(connector_ref: str, tool_slug: str, arguments: dict[str, Any]) -> Any:
     from ax_cli.connectors import execute_connector_tool
 
-    return execute_connector_tool(connector_ref, tool_slug, arguments)
+    agent_name, agent_id = _runtime_agent_identity()
+    return execute_connector_tool(
+        connector_ref,
+        tool_slug,
+        arguments,
+        agent_name=agent_name,
+        agent_id=agent_id,
+    )
 
 
 def run_connector_round(
@@ -266,7 +279,7 @@ def main() -> int:
             "detail": {"duration_ms": duration_ms, "connector_ref": connector_ref},
         }
     )
-    print(reply)
+    print(reply, flush=True)
     return 0
 
 
