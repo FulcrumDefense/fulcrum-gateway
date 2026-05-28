@@ -185,3 +185,22 @@ def main():
     except httpx.ConnectError:
         typer.echo("Error: cannot reach aX API. Is the server running?", err=True)
         sys.exit(1)
+    except gateway.GatewaySessionRejectedError:
+        typer.echo(
+            "Error 401: Gateway session token rejected by `/auth/exchange`. The token in "
+            "~/.ax/gateway/session.json is no longer valid (likely from a rotated PAT). "
+            "Run `ax gateway login` to refresh.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPStatusError as exc:
+        # Any HTTPStatusError a command didn't catch locally lands here. Typer
+        # re-raises uncaught exceptions (see Typer.__call__), so without this
+        # the operator gets a 30+ line Rich traceback instead of an actionable
+        # message (#73). handle_error parses the body and redacts secrets.
+        from .output import handle_error
+
+        try:
+            handle_error(exc)
+        except typer.Exit as exit_exc:
+            sys.exit(exit_exc.exit_code)
