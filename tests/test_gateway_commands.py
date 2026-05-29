@@ -6414,6 +6414,37 @@ def test_exec_runtime_skips_env_var_when_no_prompt(monkeypatch, tmp_path):
     assert "AX_AGENT_SYSTEM_PROMPT" not in captured["env"]
 
 
+def test_exec_handler_captures_flushed_bridge_reply(monkeypatch):
+    """Fast-exiting bridges must flush the final reply line; Gateway drains stdout before close (#104)."""
+
+    class _FastBridgeProcess:
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdout = io.StringIO("LangGraph round trip OK\n")
+            self.stderr = io.StringIO("")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    monkeypatch.setattr(gateway_core.subprocess, "Popen", lambda *a, **k: _FastBridgeProcess())
+
+    entry = {
+        "name": "langgraph-bot",
+        "exec_command": "python3 examples/gateway_langgraph/langgraph_bridge.py",
+        "runtime_type": "exec",
+    }
+    output = gateway_core._run_exec_handler(
+        entry["exec_command"],
+        "gateway test ping",
+        entry,
+    )
+    assert output == "LangGraph round trip OK"
+
+
 def test_resolve_system_prompt_input_rejects_both_flags(tmp_path):
     """Operator hygiene: --system-prompt and --system-prompt-file are
     mutually exclusive."""

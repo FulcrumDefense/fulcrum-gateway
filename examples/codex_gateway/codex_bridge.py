@@ -223,9 +223,9 @@ def _run_codex(prompt: str) -> int:
         return return_code
 
     if final_text:
-        print(final_text)
+        print(final_text, flush=True)
     else:
-        print("Codex finished without a final reply.")
+        print("Codex finished without a final reply.", flush=True)
     return 0
 
 

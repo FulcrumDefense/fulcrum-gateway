@@ -20,6 +20,8 @@ ax gateway agents start lgc-demo
 
 See `examples/gateway_langgraph_composio/README.md` for `RUN:<TOOL_SLUG>` execution syntax.
 
+For **natural-language search and execute in the aX web UI** (no `RUN:` syntax), use a **Hermes** agent with Gateway connector tools (`connector_search`, `connector_call`, `connector_apps`). See `skills/gateway-composio-connectors/SKILL.md` and `docs/demo-outbound-connectors.md`.
+
 ## Quick start
 
 ```bash
@@ -150,6 +152,9 @@ Verify provider: `ax gateway connectors providers`
 
 **Timeout errors**
 Default timeouts: 10s connect, 30s read. For slow integrations, this is not yet configurable per-connector.
+
+**Reply shows `(no output)` from an exec bridge agent**
+Exec bridges must print the final reply with `flush=True`. Gateway waits up to 5s to drain stdout before closing the pipe (issue #104). Restart the agent after upgrading bridges or gateway.
 
 **HTTP MCP "base_url not configured"**
 Run `ax gateway connectors set <ref> base_url <url>`
