@@ -4039,22 +4039,30 @@ def _run_exec_handler(
     def _consume_stdout() -> None:
         if process.stdout is None:
             return
-        for raw in process.stdout:
-            event = _parse_gateway_exec_event(raw)
-            if event is not None:
-                if on_event is not None:
-                    try:
-                        on_event(event)
-                    except Exception:
-                        pass
-                continue
-            stdout_lines.append(raw)
+        try:
+            for raw in process.stdout:
+                event = _parse_gateway_exec_event(raw)
+                if event is not None:
+                    if on_event is not None:
+                        try:
+                            on_event(event)
+                        except Exception:
+                            pass
+                    continue
+                stdout_lines.append(raw)
+        except ValueError:
+            # process.stdout was closed before this consumer drained the pipe.
+            # Fast-exiting exec bridges can hit this race; return what we have.
+            pass
 
     def _consume_stderr() -> None:
         if process.stderr is None:
             return
-        for raw in process.stderr:
-            stderr_lines.append(raw)
+        try:
+            for raw in process.stderr:
+                stderr_lines.append(raw)
+        except ValueError:
+            pass
 
     stdout_thread = threading.Thread(target=_consume_stdout, daemon=True, name=f"gw-exec-stdout-{entry.get('name')}")
     stderr_thread = threading.Thread(target=_consume_stderr, daemon=True, name=f"gw-exec-stderr-{entry.get('name')}")
@@ -4069,8 +4077,9 @@ def _run_exec_handler(
         timed_out = True
         process.kill()
     finally:
-        stdout_thread.join(timeout=1.0)
-        stderr_thread.join(timeout=1.0)
+        # Give consumer threads time to drain the pipe before close (issue #104).
+        stdout_thread.join(timeout=5.0)
+        stderr_thread.join(timeout=5.0)
         if process.stdout is not None:
             process.stdout.close()
         if process.stderr is not None:
