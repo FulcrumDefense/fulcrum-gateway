@@ -110,7 +110,7 @@ def main() -> int:
             "detail": {"duration_ms": duration_ms, "stub": True},
         }
     )
-    print(reply or f"Strands bridge for @{_agent_name()} finished without text.")
+    print(reply or f"Strands bridge for @{_agent_name()} finished without text.", flush=True)
     return 0
 
 

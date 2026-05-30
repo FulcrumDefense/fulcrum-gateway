@@ -319,7 +319,7 @@ def main() -> int:
         print(f"Ollama bridge failed: {exc}")
         return 1
 
-    print(reply or f"Ollama ({DEFAULT_OLLAMA_MODEL}) finished without text.")
+    print(reply or f"Ollama ({DEFAULT_OLLAMA_MODEL}) finished without text.", flush=True)
     return 0
 
 

@@ -1,45 +1,48 @@
 # Outbound Connectors Demo Script
 
-**Audience:** Non-technical staff
-**Duration:** ~8 minutes
-**Platform:** [https://paxai.app](https://paxai.app) (web UI only — no terminal shown)
-**Branch:** `feat/outbound-connectors-composio` (not yet merged)
+**Audience:** Non-technical staff  
+**Duration:** ~8 minutes  
+**Platform:** [https://paxai.app](https://paxai.app) (web UI only — no terminal shown)  
+**Status:** Shipped on `main` (Composio v3 adapter, Hermes connector tools, optional `langgraph_composio` template)
 
 ---
 
 ## Before the Demo (presenter only — not shown)
 
 ```bash
-# 1. Feature branch
+# 1. Install from main
 cd ~/repositories/fd-ax-gateway
-git checkout feat/outbound-connectors-composio
+git checkout main && git pull
 uv pip install -e .
 
-# 2. One-time connector setup
+# 2. One-time connector setup (Composio v3 API)
 ax gateway connectors add demo --provider composio --managed-auth
 ax gateway connectors auth write demo COMPOSIO_API_KEY=<your key>
 ax gateway connectors set demo entity_id "<your entity id>"
-ax gateway connectors set demo app_name gmail
 
-# 3. Verify Gmail and Slack are connected
+# 3. Verify connected apps
 ax gateway connectors apps demo
-# Should show: gmail  status=ACTIVE, slack  status=ACTIVE
+# Should show: gmail  status=ACTIVE, slack  status=ACTIVE, etc.
 
 # 4. Connect apps if needed
 ax gateway connectors connect demo --app gmail
 ax gateway connectors connect demo --app slack
 
-# 5. Verify @sarob-bot is healthy
+# 5. Hermes agent (recommended for web UI — natural-language search + execute)
 ax gateway agents show sarob-bot
 # Presence should be IDLE, Reachability "Live listener ready to claim work."
 
-# 6. Clear stale session history so the agent starts fresh
+# Optional: LangGraph + Composio demo agent (search + RUN:<TOOL> execute)
+# ax gateway agents add composio-demo --template langgraph_composio --connector-ref demo
+
+# 6. Clear stale session history so the agent starts fresh (Hermes)
 rm ~/.ax/gateway/agents/sarob-bot/hermes-home/sessions/session_*.json
 
 # 7. Quick smoke test
 ax send "@sarob-bot list the connected apps on the demo connector" --space ax-gateway
-# Should reply with gmail, slack, etc.
 ```
+
+See also: `docs/composio-integration.md`, `skills/gateway-composio-connectors/SKILL.md`
 
 ---
 
@@ -185,17 +188,13 @@ Scroll up in the paxai.app thread to show:
 
 ## Troubleshooting
 
-
-| Symptom                                  | Fix                                                                                     |
-| ---------------------------------------- | --------------------------------------------------------------------------------------- |
-| `Connector not found`                    | `ax gateway connectors list` to check the name                                          |
-| `COMPOSIO_API_KEY not found`             | Re-run `auth write` with the key                                                        |
-| `No connected account found`             | `ax gateway connectors connect demo --app <app>`                                        |
-| `HTTP 404` on tool call                  | Use `search` to find the correct tool slug                                              |
-| `App name and entity id must be present` | `ax gateway connectors set demo app_name <app>`                                         |
-| Agent guessing wrong commands            | Clear sessions: `rm ~/.ax/gateway/agents/sarob-bot/hermes-home/sessions/session_*.json` |
-| Agent not responding                     | `ax gateway agents show sarob-bot` — check Presence is IDLE                             |
-| Check unread replies                     | `ax messages list --unread --space ax-gateway`                                          |
-| add connector via token                  | ax gateway connectors auth write demo EXA_API_KEY=aslkdfdj....                          |
-
-
+| Symptom | Fix |
+| --- | --- |
+| `Connector not found` | `ax gateway connectors list` to check the name |
+| `COMPOSIO_API_KEY not found` | Re-run `auth write` with the key |
+| `No connected account found` | `ax gateway connectors connect demo --app <app>` |
+| `HTTP 404` / `HTTP 410` on tool call | Ensure v3 base URL; use `tools search` for the correct slug |
+| Agent guessing wrong commands | Clear Hermes sessions under `~/.ax/gateway/agents/<name>/hermes-home/sessions/` |
+| Agent not responding | `ax gateway agents show <name>` — check Presence is IDLE |
+| Reply shows `(no output)` | Bridge must `flush=True` on final reply; gateway drains stdout before close (issue #104). Run updated bridge/gateway after upgrades. |
+| Check unread replies | `ax messages list --unread --space ax-gateway` |
