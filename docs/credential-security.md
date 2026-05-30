@@ -112,7 +112,7 @@ default. To keep it off the filesystem in plaintext — useful for sync
 directories, container layer copies, and multi-assistant workspaces — see
 [Store user PAT in an encrypted secret store](scenarios/encrypted-pat-at-rest.md).
 The recipes cover dotenvx, sops, and pass; they integrate through the
-`AX_TOKEN` environment variable and the `axctl login --print` flag.
+`AX_TOKEN` environment variable and the `ax login --print` flag.
 
 ## Trusted Setup Agents
 
