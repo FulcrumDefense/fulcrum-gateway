@@ -3126,6 +3126,18 @@ class TestGatewayExchangeBoundary:
             client._get_jwt()
         client.close()
 
+    def test_guard_no_op_on_double_without_get_jwt(self):
+        """PR body contract: wrapping a client double that has no `_get_jwt`
+        (a test stand-in for AxClient) is a silent no-op, not a crash, and
+        leaves the double untouched."""
+
+        class _Double:
+            pass
+
+        double = _Double()
+        gw_cmd._guard_gateway_exchange(double)  # must not raise
+        assert not hasattr(double, "_get_jwt")
+
 
 class TestGatewaySessionStalenessWarning:
     """Regression for #74: warn when the gateway session predates the user
