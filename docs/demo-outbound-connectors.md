@@ -196,5 +196,5 @@ Scroll up in the paxai.app thread to show:
 | `HTTP 404` / `HTTP 410` on tool call | Ensure v3 base URL; use `tools search` for the correct slug |
 | Agent guessing wrong commands | Clear Hermes sessions under `~/.ax/gateway/agents/<name>/hermes-home/sessions/` |
 | Agent not responding | `ax gateway agents show <name>` — check Presence is IDLE |
-| Reply shows `(no output)` | Restart gateway after bridge updates; exec handler drains stdout before close (issue #104) |
+| Reply shows `(no output)` | Bridge must `flush=True` on final reply; gateway drains stdout before close (issue #104). Run updated bridge/gateway after upgrades. |
 | Check unread replies | `ax messages list --unread --space ax-gateway` |

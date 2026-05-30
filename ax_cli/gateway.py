@@ -3996,6 +3996,10 @@ def runtime_timeout_seconds(entry: dict[str, Any]) -> int:
     return max(MIN_HANDLER_TIMEOUT_SECONDS, timeout)
 
 
+def _is_closed_pipe_read_error(exc: BaseException) -> bool:
+    return isinstance(exc, ValueError) and "closed file" in str(exc).lower()
+
+
 def _run_exec_handler(
     command: str,
     prompt: str,
@@ -4050,10 +4054,11 @@ def _run_exec_handler(
                             pass
                     continue
                 stdout_lines.append(raw)
-        except ValueError:
+        except ValueError as exc:
+            if not _is_closed_pipe_read_error(exc):
+                raise
             # process.stdout was closed before this consumer drained the pipe.
             # Fast-exiting exec bridges can hit this race; return what we have.
-            pass
 
     def _consume_stderr() -> None:
         if process.stderr is None:
@@ -4061,8 +4066,9 @@ def _run_exec_handler(
         try:
             for raw in process.stderr:
                 stderr_lines.append(raw)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            if not _is_closed_pipe_read_error(exc):
+                raise
 
     stdout_thread = threading.Thread(target=_consume_stdout, daemon=True, name=f"gw-exec-stdout-{entry.get('name')}")
     stderr_thread = threading.Thread(target=_consume_stderr, daemon=True, name=f"gw-exec-stderr-{entry.get('name')}")
@@ -4078,8 +4084,9 @@ def _run_exec_handler(
         process.kill()
     finally:
         # Give consumer threads time to drain the pipe before close (issue #104).
-        stdout_thread.join(timeout=5.0)
-        stderr_thread.join(timeout=5.0)
+        drain_timeout = 1.0 if timed_out else 5.0
+        stdout_thread.join(timeout=drain_timeout)
+        stderr_thread.join(timeout=drain_timeout)
         if process.stdout is not None:
             process.stdout.close()
         if process.stderr is not None:

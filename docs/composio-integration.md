@@ -154,7 +154,7 @@ Verify provider: `ax gateway connectors providers`
 Default timeouts: 10s connect, 30s read. For slow integrations, this is not yet configurable per-connector.
 
 **Reply shows `(no output)` from an exec bridge agent**
-Exec bridges must print the final reply with `flush=True`. Gateway waits up to 5s to drain stdout before closing the pipe (issue #104). Restart the agent after upgrading bridges or gateway.
+Exec bridges must print the final reply with `flush=True`. Gateway waits up to 5s to drain stdout before closing the pipe (issue #104). After upgrading bridges or gateway, run the updated build (restart the agent if it is still on an old process).
 
 **HTTP MCP "base_url not configured"**
 Run `ax gateway connectors set <ref> base_url <url>`
