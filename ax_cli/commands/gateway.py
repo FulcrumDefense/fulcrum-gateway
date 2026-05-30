@@ -59,6 +59,7 @@ from ..gateway import (
     agent_token_path,
     annotate_runtime_health,
     apply_entry_current_space,
+    apply_space_to_gateway_session,
     approve_gateway_approval,
     archive_stale_gateway_approvals,
     clear_gateway_ui_state,
@@ -96,7 +97,6 @@ from ..gateway import (
     ui_log_path,
     ui_status,
     upsert_agent_entry,
-    upsert_space_cache_entry,
     verify_local_session_token,
     write_gateway_ui_state,
 )
@@ -212,6 +212,33 @@ def _warn_if_gateway_session_stale() -> None:
         return
 
 
+def _warn_if_gateway_space_divergent() -> None:
+    """Warn when the Gateway session's space differs from the CLI's space.
+
+    `ax spaces use` now syncs both stores (issue #82), but divergence can still
+    exist from a CLI that predates that fix, a hand-edited config, or a session
+    written from a different working directory. A mismatch makes
+    `ax gateway agents add` target a different space than the operator set,
+    surfacing as a cryptic 400 from /api/v1/keys ("Agent IDs not found in this
+    space").
+
+    Reads only local config — `_load_config()` merges TOML files with no network
+    call. Best-effort and fails closed silently: never raises, never blocks.
+    """
+    try:
+        from ..config import _load_config
+
+        session_space = str(load_gateway_session().get("space_id") or "").strip()
+        cli_space = str(_load_config().get("space_id") or "").strip()
+        if session_space and cli_space and session_space != cli_space:
+            err_console.print(
+                f"[yellow]Warning:[/yellow] Gateway space ({session_space}) differs from your "
+                f"CLI space ({cli_space}) — run `ax spaces use <space>` to sync both."
+            )
+    except Exception:
+        return
+
+
 def _load_gateway_user_client() -> AxClient:
     session = load_gateway_session()
     if not session:
@@ -225,6 +252,7 @@ def _load_gateway_user_client() -> AxClient:
         err_console.print("[red]Gateway bootstrap currently requires a user PAT (axp_u_).[/red]")
         raise typer.Exit(1)
     _warn_if_gateway_session_stale()
+    _warn_if_gateway_space_divergent()
     return AxClient(base_url=str(session.get("base_url") or auth_cmd.DEFAULT_LOGIN_BASE_URL), token=token)
 
 
@@ -6751,31 +6779,48 @@ def login(
 
 @spaces_app.command("use")
 def use_gateway_space(
-    space: str = typer.Argument(..., help="Space id, slug, or name to make current for Gateway"),
+    space: str = typer.Argument(..., help="Space id, slug, or name to make current"),
+    global_config: bool = typer.Option(
+        False, "--global", help="Save the CLI space to global config instead of local .ax/config.toml"
+    ),
     as_json: bool = JSON_OPTION,
 ):
-    """Set the Gateway bootstrap session's current space by id, slug, or name."""
-    session = _load_gateway_session_or_exit()
+    """Set the current space for both the Gateway session and the CLI.
+
+    Alias of `ax spaces use` — both commands now write both stores so the
+    Gateway session and CLI config can't silently diverge (issue #82).
+    """
+    from ..config import save_space_id
+
+    _load_gateway_session_or_exit()
     client = _load_gateway_user_client()
     sid = resolve_space_id(client, explicit=space)
     space_name = _space_name_for_id(client, sid)
-    session["space_id"] = sid
-    session["space_name"] = space_name
-    path = save_gateway_session(session)
-    # Persist the resolved id/name into the spaces cache so subsequent slug
-    # switches stay cache-served and stop hammering list_spaces.
-    upsert_space_cache_entry(sid, name=space_name, slug=None)
-    record_gateway_activity("gateway_space_use", space_id=sid, space_name=space_name)
+    gw_sync = apply_space_to_gateway_session(sid, space_name=space_name)
+    # Sync the CLI config store too, so `ax send` / runtime resolution agree
+    # with the Gateway session.
+    save_space_id(sid, local=not global_config)
+    session_path_str = gw_sync.get("session_path") if gw_sync else None
     result = {
-        "session_path": str(path),
+        "session_path": session_path_str,
         "space_id": sid,
         "space_name": space_name,
+        "cli_scope": "global" if global_config else "local",
+        "gateway_session": gw_sync,
     }
     if as_json:
         print_json(result)
         return
-    err_console.print(f"[green]Gateway current space:[/green] {space_name or sid} ({sid})")
-    err_console.print(f"  session = {path}")
+    err_console.print(f"[green]Current space:[/green] {space_name or sid} ({sid})")
+    if session_path_str:
+        err_console.print(f"  session = {session_path_str}")
+    err_console.print(f"  cli config = {'global' if global_config else 'local .ax/config.toml'}")
+    if gw_sync and gw_sync.get("updated") and gw_sync.get("daemon_running"):
+        err_console.print(
+            "[yellow]Warning:[/yellow] Gateway daemon is running — restart it "
+            "(`ax gateway stop && ax gateway start`) to apply the new space."
+        )
+    err_console.print("[dim]Tip: `ax spaces use` now sets both CLI and Gateway space.[/dim]")
 
 
 @spaces_app.command("current")
